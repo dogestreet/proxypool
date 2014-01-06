@@ -1,13 +1,17 @@
+-- | Entry point for proxy pool
 module Main where
 
 import ProxyPool.Util
 
+import System.IO (hPutStrLn, stderr, IOMode(..))
+
 import Network
 import Network.Socket
 
-import System.IO
+import Control.Monad (unless, forever)
+import Control.Exception (bracket)
 
-import Control.Monad
+import qualified Data.ByteString as B
 
 main :: IO ()
 main = withSocketsDo $ do
@@ -19,11 +23,25 @@ main = withSocketsDo $ do
 
     case upstream of
         []  -> hPutStrLn stderr "Could not resolve upstream server"
-        x:_ -> do
-            sock <- socket AF_INET Stream defaultProtocol
-            setSocketOption sock NoDelay 1
-            support <- configureKeepAlive sock
-            unless support $ putStrLn "No native support for TCP keep alives"
-            connect sock $ addrAddress x
+        x:_ -> bracket
+                   (socket AF_INET Stream defaultProtocol)
+                   (`shutdown` ShutdownBoth)
+                   (\sock -> do
+                       setSocketOption sock NoDelay 1
+
+                       support <- configureKeepAlive sock
+                       unless support $ putStrLn "No native support for TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT"
+                       print "Connecting"
+                       connectTimeout sock (addrAddress x) 20
+
+                       sock_handle <- socketToHandle sock ReadWriteMode
+
+                       -- TODO: subscribe to mining
+                       -- read from server
+                       forever $ do
+                           line <- B.hGetLine sock_handle
+                           print line
+                   )
+
 
     return ()
