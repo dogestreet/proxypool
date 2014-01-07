@@ -18,13 +18,16 @@ cabal-version:       >=1.10
 executable proxypool
   ghc-options:         -Wall
   main-is:             ProxyPool/Main.hs
-  other-modules:       ProxyPool.Network
+  other-modules:       ProxyPool.Network, ProxyPool.Stratum
   -- other-extensions:    
   build-depends:       base >= 4.6 && < 4.7,
                        mtl >= 2.1.2,
                        network >= 2.4.2.2,
                        bytestring >= 0.10.4.0,
                        stm >= 2.4.2,
-                       select >= 0.4.0.1
+                       select >= 0.4.0.1,
+                       aeson >= 0.6.2.1,
+                       text >= 1.0.0.1,
+                       unix >= 2.7.0.0
 
   default-language:    Haskell2010
