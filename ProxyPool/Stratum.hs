@@ -26,16 +26,30 @@ data StratumRequest
     = Subscribe
     -- | mining.authorize - username, pass
     | Authorize Text Text
-    -- | mining.submit - worker, job, extraNonce1 extraNonce2, ntime, nonce
-    | Submit Text Text Text Text Text
+    -- | mining.submit - worker, job, extraNonce2, ntime, nonce
+    | Submit { s_worker      :: Text
+             , s_job         :: Text
+             , s_entraNonce2 :: Text
+             , s_ntime       :: Text
+             , s_nonce       :: Text
+             }
 
 -- | Server to client
 data StratumResponse
-    -- | mining.notify
-    = WorkNotify Text Text Text Text Array Bool
+    -- | mining.notify - job, prevhash, coinbase1, coinbase2, merkle, blockversion, nbit, ntime, clean
+    = WorkNotify { wn_job          :: Text
+                 , wn_prevHash     :: Text
+                 , wn_coinbase1    :: Text
+                 , wn_coinbase2    :: Text
+                 , wn_merkle       :: Array
+                 , wn_blockVersion :: Text
+                 , wn_nBit         :: Text
+                 , wn_nTime        :: Text
+                 , wn_clean        :: Bool
+                 }
     -- | mining.set_difficulty
     | SetDifficulty Double
-    -- | Initial server response - extranonce1 and extranonce2
+    -- | Initial server response - extranonce1 and extranonce2_size
     | Initalise Text Int
     -- | General response to request - either the error or the result
     | General (Either Value Bool)
@@ -67,8 +81,8 @@ parseNotify v = do
         "mining.notify" -> do
             (params :: [Value]) <- v .: "params"
             case params of
-                [String j, String ph, String cb1, String cb2, Array merkle, Bool c] ->
-                    return $ Response rid $ WorkNotify j ph cb1 cb2 merkle c
+                [String j, String ph, String cb1, String cb2, Array merkle, String ver, String nb, String nt, Bool c] ->
+                    return $ Response rid $ WorkNotify j ph cb1 cb2 merkle ver nb nt c
                 _ -> mzero
         "mining.set_difficulty" -> do
             (params :: [Double]) <- v .: "params"
@@ -127,8 +141,8 @@ instance ToJSON Request where
         requestTemplate rid "mining.submit" $ toJSON [worker, job, en2, ntime, nonce]
 
 instance ToJSON Response where
-    toJSON (Response _   (WorkNotify job prevhash cb1 cb2 merkle clean)) =
-        notifyTemplate "mining.notify" $ toJSON [String job, String prevhash, String cb1, String cb2, Array merkle, Bool clean]
+    toJSON (Response _   (WorkNotify job prevhash cb1 cb2 merkle version nbit ntime clean)) =
+        notifyTemplate "mining.notify" $ toJSON $ map String [job, prevhash, cb1, cb2] ++ [Array merkle] ++ map String [version, nbit, ntime] ++ [Bool clean]
     toJSON (Response _   (SetDifficulty diff)) =
         notifyTemplate "mining.set_difficulty" $ toJSON [Number $ fromRational . toRational $ diff]
     toJSON (Response rid (Initalise en size)) =

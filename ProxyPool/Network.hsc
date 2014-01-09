@@ -46,7 +46,7 @@ configureKeepAlive sock = do
     return False
 #endif
 
--- | Modified version of 'connect' with a timeout, for the record, the Haskell TCP networking library is utter garbage.
+-- | Modified version of 'connect' with a timeout
 connectTimeout :: Socket   -- Unconnected Socket
                -> SockAddr -- Socket address stuff
                -> Int      -- Timeout, in seconds
