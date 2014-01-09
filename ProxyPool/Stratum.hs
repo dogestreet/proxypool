@@ -29,8 +29,8 @@ data StratumRequest
     -- | mining.submit - worker, job, extraNonce2, ntime, nonce
     | Submit { s_worker      :: Text
              , s_job         :: Text
-             , s_entraNonce2 :: Text
-             , s_ntime       :: Text
+             , s_extraNonce2 :: Text
+             , s_nTime       :: Text
              , s_nonce       :: Text
              }
 
@@ -52,7 +52,7 @@ data StratumResponse
     -- | Initial server response - extranonce1 and extranonce2_size
     | Initalise Text Int
     -- | General response to request - either the error or the result
-    | General (Either Value Bool)
+    | General (Either Value Value)
 
 instance FromJSON Request where
     parseJSON (Object v) = do
@@ -101,7 +101,7 @@ parseResponse v = do
                                     (en2 :: Int) <- parseJSON en2size
                                     return $ Response rid $ Initalise en1 en2
                                  _                        -> mzero
-        (Null, Bool x)    -> return $ Response rid $ General $ Right x
+        (Null, x)         -> return $ Response rid $ General $ Right x
         (err', Null)      -> return $ Response rid $ General $ Left err'
         _                 -> mzero
 
@@ -146,6 +146,6 @@ instance ToJSON Response where
     toJSON (Response _   (SetDifficulty diff)) =
         notifyTemplate "mining.set_difficulty" $ toJSON [Number $ fromRational . toRational $ diff]
     toJSON (Response rid (Initalise en size)) =
-        responseTemplate rid $ Right $ toJSON [String "mining.notify", String "ae6812eb4cd7735a302a8a9dd95cf71f", String en, Number $ fromRational . toRational $ size]
+        responseTemplate rid $ Right $ toJSON [ toJSON [String "mining.notify", String "ae6812eb4cd7735a302a8a9dd95cf71f"], String en, Number $ fromRational . toRational $ size]
     toJSON (Response rid (General result)) =
-        responseTemplate rid $ fmap Bool result
+        responseTemplate rid result
