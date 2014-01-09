@@ -1,24 +1,18 @@
 -- | Entry point for proxy pool
 module Main where
 
-import ProxyPool.Util
-import ProxyPool.Stratum
+import ProxyPool.Network (configureKeepAlive, connectTimeout)
+import ProxyPool.Handlers (handleClient, handleServer)
+
+import Control.Monad (forever)
+import Control.Exception (bracket, bracket_, catch, IOException)
+import Control.Concurrent (forkIO)
 
 import System.Posix.Signals (installHandler, sigPIPE, Handler(..))
-import System.IO (Handle, hPutStrLn, hClose, stderr, IOMode(..))
+import System.IO (hPutStrLn, hClose, stderr, IOMode(..))
 
 import Network
 import Network.Socket hiding (accept)
-
-import Control.Applicative ((<$>))
-
-import Control.Monad (unless, forever)
-import Control.Exception (bracket, bracket_, catch, IOException)
-import Control.Concurrent (forkIO, ThreadId)
-
-import Control.Concurrent.STM
-
-import qualified Data.ByteString as B
 
 -- | Manage incoming connections
 listenDownstream :: IO ()
@@ -31,21 +25,15 @@ listenDownstream = do
     -- listen for connections on separate thread
     _ <- forkIO . forever $ do
             (handle, _, _) <- accept sock
-            forkIO $ handleClient handle
+            -- handle each incoming connection on a separate thread
+            forkIO $
+                bracket_
+                    (return handle)
+                    (hClose handle)
+                    (handleClient handle)
+                `catch` \e -> hPutStrLn stderr $ "IOException in client: " ++ show (e :: IOException)
 
     putStrLn "Server started"
-
--- | Handles a connected miner
-handleClient :: Handle -> IO ()
-handleClient handle =
-    bracket_
-        (return handle)
-        (hClose handle)
-        (forever $ do
-            line <- B.hGetLine handle
-            print line
-        )
-    `catch` \e -> hPutStrLn stderr $ "IOException in client: " ++ show (e :: IOException)
 
 -- | Handles connection to upstream pool server
 runUpstream :: IO ()
@@ -64,6 +52,7 @@ runUpstream = forever $ do
                         hPutStrLn stderr "Exception thrown, reconnecting"
                    )
                    (\sock -> do
+                       -- set up socket
                        setSocketOption sock NoDelay 1
                        _ <- configureKeepAlive sock
 
@@ -71,19 +60,14 @@ runUpstream = forever $ do
                        connectTimeout sock (addrAddress x) 20
 
                        sock_handle <- socketToHandle sock ReadWriteMode
-
-                       -- TODO: subscribe to mining
-                       -- read from server
-                       forever $ do
-                           line <- B.hGetLine sock_handle
-                           print line
+                       handleServer sock_handle
                    )
                `catch` \e -> hPutStrLn stderr $ "IOException: " ++ show (e :: IOException)
 
 main :: IO ()
 main = withSocketsDo $ do
-    -- don't let the process die from a broken socket
-    installHandler sigPIPE Ignore Nothing
+    -- don't let the process die from a broken pipe
+    _ <- installHandler sigPIPE Ignore Nothing
 
     listenDownstream
     runUpstream
