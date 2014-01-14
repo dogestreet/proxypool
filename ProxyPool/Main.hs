@@ -2,22 +2,24 @@
 module Main where
 
 import ProxyPool.Network (configureKeepAlive, connectTimeout)
-import ProxyPool.Handlers (handleClient, handleServer)
+import ProxyPool.Handlers (HandlerState, handlerInitalise, initaliseClient, handleClient, finaliseClient, handleServer, ServerSettings(..))
 
 import Control.Monad (forever)
-import Control.Exception (bracket, bracket_, catch, IOException)
+import Control.Exception (bracket, catch, IOException)
 import Control.Concurrent (forkIO)
 
 import System.Posix.Signals (installHandler, sigPIPE, Handler(..))
-import System.IO (hPutStrLn, hClose, stderr, IOMode(..))
+import System.IO (hPutStrLn, stderr, IOMode(..))
+
+import Data.Word
 
 import Network
 import Network.Socket hiding (accept)
 
 -- | Manage incoming connections
-listenDownstream :: IO ()
-listenDownstream = do
-    sock <- listenOn (PortNumber 9555)
+listenDownstream :: HandlerState -> Word16 -> IO ()
+listenDownstream state port = do
+    sock <- listenOn (PortNumber $ PortNum port)
     setSocketOption sock ReuseAddr 1
     setSocketOption sock NoDelay 1
     _ <- configureKeepAlive sock
@@ -27,21 +29,21 @@ listenDownstream = do
             (handle, _, _) <- accept sock
             -- handle each incoming connection on a separate thread
             forkIO $
-                bracket_
-                    (return handle)
-                    (hClose handle)
-                    (handleClient handle)
+                bracket
+                    (initaliseClient handle state)
+                    finaliseClient
+                    (handleClient state)
                 `catch` \e -> hPutStrLn stderr $ "IOException in client: " ++ show (e :: IOException)
 
     putStrLn "Server started"
 
 -- | Handles connection to upstream pool server
-runUpstream :: IO ()
-runUpstream = forever $ do
+runUpstream :: HandlerState -> String -> Int -> IO ()
+runUpstream state url port = forever $ do
     upstream <- getAddrInfo
                     (Just $ defaultHints { addrFamily = AF_INET, addrSocketType = Stream })
-                    (Just "pool.doge.st")
-                    (Just "9555")
+                    (Just url)
+                    (Just $ show port)
 
     case upstream of
         []  -> hPutStrLn stderr "Could not resolve upstream server"
@@ -60,7 +62,7 @@ runUpstream = forever $ do
                        connectTimeout sock (addrAddress x) 20
 
                        sock_handle <- socketToHandle sock ReadWriteMode
-                       handleServer sock_handle
+                       handleServer sock_handle state
                    )
                `catch` \e -> hPutStrLn stderr $ "IOException: " ++ show (e :: IOException)
 
@@ -69,5 +71,8 @@ main = withSocketsDo $ do
     -- don't let the process die from a broken pipe
     _ <- installHandler sigPIPE Ignore Nothing
 
-    listenDownstream
-    runUpstream
+    -- create the global state
+    state <- handlerInitalise $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc" "anything" 2 2
+
+    listenDownstream state 9555
+    runUpstream state "pool.doge.st" 9555
