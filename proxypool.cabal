@@ -33,6 +33,7 @@ executable proxypool
                        , unix >= 2.6.0.0
                        , vector >= 0.10.9.1
                        , hashtables >= 1.1.2.1
+                       , either >= 4.1
 
     default-language:    Haskell2010
 
@@ -57,5 +58,6 @@ Test-suite json
                        , unix
                        , vector
                        , hashtables
+                       , either
 
     default-language:    Haskell2010

@@ -1,8 +1,9 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- | Entry point for proxy pool
 module Main where
 
 import ProxyPool.Network (configureKeepAlive, connectTimeout)
-import ProxyPool.Handlers (HandlerState, handlerInitalise, initaliseClient, handleClient, finaliseClient, handleServer, ServerSettings(..))
+import ProxyPool.Handlers
 
 import Control.Monad (forever)
 import Control.Exception (bracket, catch, IOException)
@@ -17,7 +18,7 @@ import Network
 import Network.Socket hiding (accept)
 
 -- | Manage incoming connections
-listenDownstream :: HandlerState -> Word16 -> IO ()
+listenDownstream :: GlobalState -> Word16 -> IO ()
 listenDownstream state port = do
     sock <- listenOn (PortNumber $ PortNum port)
     setSocketOption sock ReuseAddr 1
@@ -38,7 +39,7 @@ listenDownstream state port = do
     putStrLn "Server started"
 
 -- | Handles connection to upstream pool server
-runUpstream :: HandlerState -> String -> Int -> IO ()
+runUpstream :: GlobalState -> String -> Int -> IO ()
 runUpstream state url port = forever $ do
     upstream <- getAddrInfo
                     (Just $ defaultHints { addrFamily = AF_INET, addrSocketType = Stream })
@@ -48,23 +49,21 @@ runUpstream state url port = forever $ do
     case upstream of
         []  -> hPutStrLn stderr "Could not resolve upstream server"
         x:_ -> bracket
-                   (socket AF_INET Stream defaultProtocol)
-                   (\sock -> do
-                        shutdown sock ShutdownBoth
-                        hPutStrLn stderr "Exception thrown, reconnecting"
-                   )
-                   (\sock -> do
-                       -- set up socket
-                       setSocketOption sock NoDelay 1
-                       _ <- configureKeepAlive sock
+                   (do
+                        sock <- socket AF_INET Stream defaultProtocol
+                        -- set up socket
+                        setSocketOption sock NoDelay 1
+                        _ <- configureKeepAlive sock
 
-                       print "Connecting"
-                       connectTimeout sock (addrAddress x) 20
+                        putStrLn "Connecting to upstream"
+                        connectTimeout sock (addrAddress x) 20
 
-                       sock_handle <- socketToHandle sock ReadWriteMode
-                       handleServer sock_handle state
+                        handle <- socketToHandle sock ReadWriteMode
+                        initaliseServer handle
                    )
-               `catch` \e -> hPutStrLn stderr $ "IOException: " ++ show (e :: IOException)
+                   finaliseServer
+                   (handleServer state)
+               `catch` \e -> hPutStrLn stderr $ "IOException in server: " ++ show (e :: IOException)
 
 main :: IO ()
 main = withSocketsDo $ do
@@ -72,7 +71,7 @@ main = withSocketsDo $ do
     _ <- installHandler sigPIPE Ignore Nothing
 
     -- create the global state
-    state <- handlerInitalise $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc" "anything" 2 2
+    state <- initaliseGlobal $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc" "anything" 2 2
 
     listenDownstream state 9555
     runUpstream state "pool.doge.st" 9555
