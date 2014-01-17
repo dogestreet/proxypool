@@ -34,6 +34,7 @@ executable proxypool
                        , vector >= 0.10.9.1
                        , hashtables >= 1.1.2.1
                        , either >= 4.1
+                       , hslogger >= 1.2.3
 
     default-language:    Haskell2010
 
@@ -59,5 +60,6 @@ Test-suite json
                        , vector
                        , hashtables
                        , either
+                       , hslogger
 
     default-language:    Haskell2010

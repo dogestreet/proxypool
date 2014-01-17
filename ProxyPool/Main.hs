@@ -8,9 +8,15 @@ import ProxyPool.Handlers
 import Control.Monad (forever)
 import Control.Exception (bracket, catch, IOException)
 import Control.Concurrent (forkIO)
+import Control.Applicative ((<$>))
 
 import System.Posix.Signals (installHandler, sigPIPE, Handler(..))
-import System.IO (hPutStrLn, stderr, IOMode(..))
+import System.IO (stdout, IOMode(..))
+
+import System.Log.Logger
+import System.Log.Handler (setFormatter)
+import System.Log.Handler.Simple
+import System.Log.Formatter
 
 import Data.Word
 
@@ -20,23 +26,26 @@ import Network.Socket hiding (accept)
 -- | Manage incoming connections
 listenDownstream :: GlobalState -> Word16 -> IO ()
 listenDownstream state port = do
-    sock <- listenOn (PortNumber $ PortNum port)
+    sock <- listenOn $ PortNumber $ fromIntegral port
+
     setSocketOption sock ReuseAddr 1
     setSocketOption sock NoDelay 1
     _ <- configureKeepAlive sock
 
+    infoM "client" $ "Listening on localhost:" ++ show port
     -- listen for connections on separate thread
     _ <- forkIO . forever $ do
-            (handle, _, _) <- accept sock
-            -- handle each incoming connection on a separate thread
-            forkIO $
-                bracket
-                    (initaliseClient handle state)
-                    finaliseClient
-                    (handleClient state)
-                `catch` \e -> hPutStrLn stderr $ "IOException in client: " ++ show (e :: IOException)
+        (handle, host, _) <- accept sock
+        -- handle each incoming connection on a separate thread
+        forkIO $ do
+            infoM "client" $ "Accepted connection from " ++ host
+            bracket
+                (initaliseClient handle state)
+                finaliseClient
+                (handleClient state)
+            `catch` \e -> warningM "client" $ "IOException in client: " ++ show (e :: IOException)
 
-    putStrLn "Server started"
+    return ()
 
 -- | Handles connection to upstream pool server
 runUpstream :: GlobalState -> String -> Int -> IO ()
@@ -47,7 +56,7 @@ runUpstream state url port = forever $ do
                     (Just $ show port)
 
     case upstream of
-        []  -> hPutStrLn stderr "Could not resolve upstream server"
+        []  -> criticalM "server" "Could not resolve upstream server"
         x:_ -> bracket
                    (do
                         sock <- socket AF_INET Stream defaultProtocol
@@ -55,7 +64,7 @@ runUpstream state url port = forever $ do
                         setSocketOption sock NoDelay 1
                         _ <- configureKeepAlive sock
 
-                        putStrLn "Connecting to upstream"
+                        infoM "server" $ "Connecting to upstream: " ++ url ++ ":" ++ show port
                         connectTimeout sock (addrAddress x) 20
 
                         handle <- socketToHandle sock ReadWriteMode
@@ -63,12 +72,16 @@ runUpstream state url port = forever $ do
                    )
                    finaliseServer
                    (handleServer state)
-               `catch` \e -> hPutStrLn stderr $ "IOException in server: " ++ show (e :: IOException)
+               `catch` \e -> warningM "server" $ "IOException in server: " ++ show (e :: IOException)
 
 main :: IO ()
 main = withSocketsDo $ do
     -- don't let the process die from a broken pipe
     _ <- installHandler sigPIPE Ignore Nothing
+
+    -- start the logger
+    logger <- flip setFormatter (tfLogFormatter "%F %T" "[$time][$loggername][$prio] $msg") <$> streamHandler stdout DEBUG
+    updateGlobalLogger rootLoggerName $ setLevel DEBUG . setHandlers [logger]
 
     -- create the global state
     state <- initaliseGlobal $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc" "anything" 2 2

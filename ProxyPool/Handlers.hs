@@ -13,16 +13,15 @@ module ProxyPool.Handlers (
     GlobalState,
     ServerSettings(..)) where
 
--- TODO: clean up error outputs
-
 import ProxyPool.Stratum
 
 import System.IO (Handle, hClose)
+import System.Log.Logger
 
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow ((&&&))
 
-import Control.Monad (forever, join)
+import Control.Monad (forever, join, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either
 
@@ -37,10 +36,9 @@ import Data.Monoid ((<>))
 import Text.Printf
 
 import qualified Data.Text as T
-import qualified Data.Text.IO as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy.Builder as TL
-import qualified Data.Text.Lazy.IO as TL
+import qualified Data.Text.Lazy.Encoding as TL
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
@@ -56,12 +54,14 @@ data HandlerState
                    }
 
 data ServerState
-    = ServerState { s_handler   :: HandlerState
+    = ServerState { s_handler    :: HandlerState
+                  , s_writerChan :: Chan BS.ByteString
                   }
 
 data ClientState
     = ClientState { c_handler      :: HandlerState
                   , c_currentNonce :: IORef Integer
+                  , c_writerChan   :: Chan BS.ByteString
                   }
 
 data ServerSettings
@@ -104,7 +104,7 @@ upstreamResponse global rid resp = do
             Just cb -> do
                 H.delete (_matches global) rid
                 return cb
-            Nothing -> return $ const $ putStrLn $ "Invalid rid: " ++ show rid ++ show resp
+            Nothing -> return $ const $ warningM "upstream" $ "Invalid rid: " ++ show rid ++ " " ++ show resp
 
     callback resp
 
@@ -127,11 +127,11 @@ finaliseHandler state = do
     readIORef (_children state) >>= mapM_ killThread
 
 -- | Initalises client state
---   TODO: add more data as neccessary
 initaliseClient :: Handle -> GlobalState -> IO ClientState
 initaliseClient handle _ = ClientState             <$>
                            initaliseHandler handle <*>
-                           newIORef 0
+                           newIORef 0              <*>
+                           newChan
 
 recordChild :: HandlerState -> ThreadId -> IO ()
 recordChild handler tid = modifyIORef' (_children $ handler) (tid:)
@@ -155,7 +155,10 @@ handleClient global local = do
     let
         -- | Write server response
         writeResponse :: Value -> StratumResponse -> IO ()
-        writeResponse rid resp = B8.hPutStrLn handle . BL.toStrict . encode $ Response rid resp
+        writeResponse rid resp = writeResponseRaw $ BL.toStrict . encode $ Response rid resp
+
+        writeResponseRaw :: BS.ByteString -> IO ()
+        writeResponseRaw = writeChan (c_writerChan local)
 
         en2Size :: Int
         en2Size = _extraNonce2Size . _settings $ global
@@ -168,6 +171,11 @@ handleClient global local = do
 
         handle :: Handle
         handle = _handle . c_handler $ local
+
+    -- thread to sequence writes
+    (recordChild (c_handler local) =<<) . forkIO . forever $ do
+        line <- readChan (c_writerChan local)
+        B8.hPutStrLn handle line
 
     -- TODO: Time out client if non initialisation
     -- wait for mining.subscription call
@@ -187,23 +195,20 @@ handleClient global local = do
                 -- get generate unique client nonce
                 nonce <- nextNonce
 
-                TL.hPutStr handle $ TL.toLazyText $ foldr1 (<>) $ map TL.fromText
-                    [ "{id:null,error:null,method:\"mining.notify\",params:["
+                writeResponseRaw $ BL.toStrict $ TL.encodeUtf8 $ TL.toLazyText $ foldr1 (<>) $ map TL.fromText
+                    [ "{\"id\":null,\"error\":null,\"method\":\"mining.notify\",\"params\":["
                     , "\"", job, "\","
                     , "\"", prev, "\",\""
-                    ]
-                T.hPutStr handle cb1
-                -- append things to cb1
-                TL.hPutStr handle $ TL.toLazyText $ foldr1 (<>) $ map TL.fromText
-                    [ extraNonce1
+                    , cb1
+                    , extraNonce1
                     , packEn2 nonce
                     , "\",\"", cb2, "\","
-                    , "\"", T.decodeUtf8 (BL.toStrict $ encode merkle), "\","
+                    , T.decodeUtf8 (BL.toStrict $ encode merkle), ","
                     , "\"", bv, "\","
                     , "\"", nbit, "\","
                     , "\"", ntime, "\","
                     , if clean then "true" else "false"
-                    , "]}\n"
+                    , "]}"
                     ]
 
                 atomicWriteIORef (c_currentNonce local) nonce
@@ -218,6 +223,8 @@ handleClient global local = do
             finish user
         _ -> continue
 
+    infoM "client" $ T.unpack $ "Client " <> user <> " authorized"
+
     -- process workers submissions (forever)
     process handle $ \case
         Just (Request rid req) -> liftIO $ do
@@ -227,8 +234,8 @@ handleClient global local = do
             upstreamRequest global (req { s_extraNonce2 = packEn2 nonce <> s_extraNonce2 req }) $ \resp -> do
                 -- record if share was accepted
                 case resp of
-                    General (Right _) -> T.putStrLn $ "Share accepted" <> user
-                    General (Left _)  -> T.putStrLn $ "Share rejected" <> user
+                    General (Right _) -> debugM "share" $ T.unpack $ "Share accepted " <> user
+                    General (Left _)  -> debugM "share" $ T.unpack $ "Share rejected " <> user
                     _ -> return ()
 
                 writeResponse rid resp
@@ -238,7 +245,7 @@ finaliseClient :: ClientState -> IO ()
 finaliseClient = finaliseHandler . c_handler
 
 initaliseServer :: Handle -> IO ServerState
-initaliseServer handle = ServerState <$> initaliseHandler handle
+initaliseServer handle = ServerState <$> initaliseHandler handle <*> newChan
 
 handleServer :: GlobalState -> ServerState -> IO ()
 handleServer global local = do
@@ -247,9 +254,15 @@ handleServer global local = do
         handle = _handle . s_handler $ local
 
         writeRequest :: Request -> IO ()
-        writeRequest = B8.hPutStrLn handle . BL.toStrict . encode
+        writeRequest = writeChan (s_writerChan local) . BL.toStrict . encode
+
+    -- thread to sequence writes
+    (recordChild (s_handler local) =<<) . forkIO . forever $ do
+        line <- readChan (s_writerChan local)
+        B8.hPutStrLn handle line
 
     -- subscribe to mining
+    infoM "server" "Sending mining subscription"
     writeRequest $ Request (Number 1) Subscribe
 
     -- wait for subscription response
@@ -257,7 +270,12 @@ handleServer global local = do
         Just (Response (Number 1) (Initalise en1 oen2s)) -> finish (en1, oen2s)
         _ -> continue
 
+    infoM "server" "Received subscription response"
+    -- verify nonce configuration
+    when (originalEn2Size /= (_extraNonce2Size . _settings $ global) + (_extraNonce3Size . _settings $ global)) $ error $ "Invalid nonce sizes specified, must add up to " ++ show originalEn2Size
+
     -- authorize
+    infoM "server" "Sending authorization"
     writeRequest $ Request (Number 2) $ Authorize (_username . _settings $ global) (_password . _settings $ global)
 
     -- wait for authorization response
@@ -265,6 +283,8 @@ handleServer global local = do
         Just (Response (Number 2) (General (Right _))) -> finish ()
         Just (Response (Number 2) (General (Left _)))  -> error "Upstream authorisation failed"
         _ -> continue
+
+    infoM "server" "Upstream authorized"
 
     -- thread to listen for server notifications
     (recordChild (s_handler local) =<<) . forkIO $ do
