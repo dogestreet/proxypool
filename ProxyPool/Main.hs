@@ -35,10 +35,10 @@ listenDownstream state port = do
     infoM "client" $ "Listening on localhost:" ++ show port
     -- listen for connections on separate thread
     _ <- forkIO . forever $ do
-        (handle, host, _) <- accept sock
+        (handle, host, remotePort) <- accept sock
         -- handle each incoming connection on a separate thread
         forkIO $ do
-            infoM "client" $ "Accepted connection from " ++ host
+            infoM "client" $ "Accepted connection from " ++ host ++ ":" ++ show remotePort
             bracket
                 (initaliseClient handle state)
                 finaliseClient
@@ -88,3 +88,4 @@ main = withSocketsDo $ do
 
     listenDownstream state 9555
     runUpstream state "pool.doge.st" 9555
+t

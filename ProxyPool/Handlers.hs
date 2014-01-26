@@ -14,6 +14,7 @@ module ProxyPool.Handlers (
     ServerSettings(..)) where
 
 import ProxyPool.Stratum
+import ProxyPool.Mining
 
 import System.IO (Handle, hClose)
 import System.Log.Logger
