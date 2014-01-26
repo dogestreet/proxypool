@@ -88,4 +88,3 @@ main = withSocketsDo $ do
 
     listenDownstream state 9555
     runUpstream state "pool.doge.st" 9555
-t

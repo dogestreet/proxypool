@@ -1,6 +1,7 @@
 {-# Language CPP, ForeignFunctionInterface #-}
 module ProxyPool.Mining (
     scrypt
+  , getPOW
   , packBlockHeader
   , merkleRoot
   , fromHex
@@ -8,11 +9,11 @@ module ProxyPool.Mining (
   , unpackIntLE
   , unpackBE
   , packIntLE
+  , targetToDifficulty
   , Work (..)
 ) where
 
 import ProxyPool.Stratum
-import Debug.Trace
 
 import Foreign hiding (unsafePerformIO)
 import Foreign.C.Types
@@ -64,6 +65,15 @@ fromWorkNotify wn@(WorkNotify{}) = do
 
 fromWorkNotify _ = Nothing
 
+-- | Get the the share bits from submission
+getPOW :: StratumRequest -> Work -> (Integer, Int) -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
+getPOW sb@(Submit{}) work en1 en2 en3Size f = f $ packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
+    where en3    = unpackIntLE . fromHex $ s_extraNonce2 sb
+          ntime  = unpackIntBE . fromHex $ s_nTime sb
+          nonce  = unpackIntBE . fromHex $ s_nonce sb
+
+getPOW _ _ _ _ _ _ = 0
+
 -- | Scrypt proof of work algorithm, expect input to be exactly 80 bytes
 scrypt :: B.ByteString -> Integer
 scrypt header = unsafePerformIO $ do
@@ -88,7 +98,7 @@ unpackBE :: B.ByteString -> B.ByteString
 unpackBE xs = BL.toStrict $ B.toLazyByteString $ mconcat $ take (B.length xs `quot` 4) $ map (B.byteString . B.reverse . B.take 4) $ iterate (B.drop 4) xs
 
 -- | Generates an 80 byte block header
-packBlockHeader :: Work -> (Integer, Int) -> (Integer, Int) -> (Integer, Int) -> Int -> Int -> B.ByteString
+packBlockHeader :: Work -> (Integer, Int) -> (Integer, Int) -> (Integer, Int) -> Integer -> Integer -> B.ByteString
 packBlockHeader work en1 en2 en3 ntime nonce
     = let coinbase = BL.toStrict $ B.toLazyByteString $ B.byteString (w_coinbase1 work) <>
                                                         uncurry packIntLE en1           <>
@@ -122,3 +132,6 @@ hd2a h d = (15 * h) / (1073741824 * d)
 
 ad2h :: Double -> Double -> Double
 ad2h a d = (1073741824 * a * d) / 15
+
+targetToDifficulty :: Integer -> Double
+targetToDifficulty target = (0xffff0000 * 2^(256-64) + 1) / (fromInteger target + 1.0)
