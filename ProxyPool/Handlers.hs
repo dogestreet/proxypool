@@ -188,9 +188,12 @@ handleClient global local = do
             finish ()
         _ -> continue
 
+    -- duplicate server notification channel
+    localNotifyChan <- dupChan (_notifyChan global)
+
     -- proxy server notifications
     (recordChild (c_handler local) =<<) . forkIO . forever $ do
-        readChan (_notifyChan global) >>= \case
+        readChan localNotifyChan >>= \case
             -- coinbase1 is usually massive, so appending at the back will cost us a lot, we'll have to hand serialise this
             WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean extraNonce1 _ -> liftIO $ do
                 -- get generate unique client nonce

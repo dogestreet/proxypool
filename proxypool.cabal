@@ -15,14 +15,13 @@ build-type:          Simple
 -- extra-source-files:  
 cabal-version:       >=1.10
 
-executable proxypool
+library
     c-sources:           scrypt/scrypt.c
     cc-options:          -Wall -std=c99
     include-dirs:        include
     ghc-options:         -Wall
     ghc-prof-options:    -auto-all -caf-all -rtsopts
-    main-is:             ProxyPool/Main.hs
-    other-modules:       ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
+    exposed-modules:     ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
     -- other-extensions:
     build-depends:       base >= 4.6 && < 4.7
                        , containers >= 0.5
@@ -43,34 +42,55 @@ executable proxypool
 
     default-language:    Haskell2010
 
-Test-suite Test
-    -- we have to do it this way because if I put proxypool into build-depends we get <command line>: cannot satisfy -package-id proxypool-X.X.X.X-inplace
-
-    hs-source-dirs:      ., tests
-    main-is:             Test.hs
-    type:                exitcode-stdio-1.0
-
-    c-sources:           scrypt/scrypt.c
-    include-dirs:        include
-    other-modules:       ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
-
-    build-depends:       tasty >= 0.7
-                       , tasty-hspec >= 0.1
+executable server
+    hs-source-dirs:      ProxyPool/Server
+    main-is:             Main.hs
+    ghc-options:         -Wall
+    ghc-prof-options:    -auto-all -caf-all -rtsopts
+    build-depends:       proxypool
                        , base
-                       , containers
                        , mtl
                        , transformers
                        , network
                        , bytestring
-                       , stm
-                       , select
-                       , aeson
-                       , text
                        , unix
-                       , vector
-                       , either
                        , hslogger
+                       , text
+
+    default-language:    Haskell2010
+
+executable client
+    hs-source-dirs:      ProxyPool/Client
+    main-is:             Main.hs
+    ghc-options:         -Wall
+    build-depends:       proxypool
+                       , base
+                       , mtl
+                       , transformers
+                       , network
+                       , bytestring
+                       , unix
+                       , text
+                       , random
+                       , aeson
+
+    default-language:    Haskell2010
+
+Test-suite Test
+    hs-source-dirs:      tests
+    type:                exitcode-stdio-1.0
+    main-is:             Test.hs
+
+    build-depends:       proxypool
+                       , tasty >= 0.7
+                       , tasty-hspec >= 0.1
+                       , base
+                       , bytestring
+                       , text
+                       , aeson
+                       , transformers
                        , cryptohash
+                       , vector
                        , base16-bytestring
 
     default-language:    Haskell2010

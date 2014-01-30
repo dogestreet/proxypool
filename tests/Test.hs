@@ -1,3 +1,5 @@
+module Main where
+
 import qualified JSON
 import qualified POW
 

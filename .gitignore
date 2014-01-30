@@ -2,6 +2,9 @@
 *.o
 *.hi
 *.prof
+*.hp
+*.aux
+*.ps
 dist/
 .cabal-sandbox/
 cabal.sandbox.config
