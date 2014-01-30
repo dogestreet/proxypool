@@ -4,7 +4,7 @@
 name:                proxypool
 version:             0.1.0.0
 synopsis:            Stratum to Stratum mining proxy
--- description:         
+description:         Stratum proxy pool
 license:             AGPL-3
 license-file:        LICENSE
 author:              jpmorgan
@@ -17,8 +17,10 @@ cabal-version:       >=1.10
 
 executable proxypool
     c-sources:           scrypt/scrypt.c
+    cc-options:          -Wall -std=c99
     include-dirs:        include
     ghc-options:         -Wall
+    ghc-prof-options:    -auto-all -caf-all -rtsopts
     main-is:             ProxyPool/Main.hs
     other-modules:       ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
     -- other-extensions:
@@ -34,7 +36,6 @@ executable proxypool
                        , text >= 1.0.0.1
                        , unix >= 2.6.0.0
                        , vector >= 0.10.9.1
-                       , hashtables >= 1.1.2.1
                        , either >= 4.1
                        , hslogger >= 1.2.3
                        , cryptohash >= 0.11
@@ -67,7 +68,6 @@ Test-suite Test
                        , text
                        , unix
                        , vector
-                       , hashtables
                        , either
                        , hslogger
                        , cryptohash

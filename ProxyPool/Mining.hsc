@@ -1,15 +1,20 @@
-{-# Language CPP, ForeignFunctionInterface #-}
+{-# Language CPP, ForeignFunctionInterface, OverloadedStrings #-}
 module ProxyPool.Mining (
     scrypt
   , getPOW
   , packBlockHeader
   , merkleRoot
   , fromHex
+  , toHex
   , fromWorkNotify
   , unpackIntLE
   , unpackBE
   , packIntLE
   , targetToDifficulty
+  , ah2d
+  , hd2a
+  , ad2h
+  , emptyWork
   , Work (..)
 ) where
 
@@ -65,6 +70,15 @@ fromWorkNotify wn@(WorkNotify{}) = do
 
 fromWorkNotify _ = Nothing
 
+emptyWork :: Work
+emptyWork = Work ""
+                 (B.replicate 32 0)
+                 "blank"
+                 "blank"
+                 []
+                 0
+                 (B.replicate 4 0)
+
 -- | Get the the share bits from submission
 getPOW :: StratumRequest -> Work -> (Integer, Int) -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
 getPOW sb@(Submit{}) work en1 en2 en3Size f = f $ packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
@@ -117,11 +131,15 @@ packBlockHeader work en1 en2 en3 ntime nonce
 
 -- | Create merkle root
 merkleRoot :: B.ByteString -> [B.ByteString] -> B.ByteString
-merkleRoot coinbase branches = foldl (\acc x -> S.hash $ S.hash $ acc <> x) B.empty $ coinbase : branches
+merkleRoot coinbase branches = foldl (\acc x -> doubleHash $ acc <> x) (doubleHash coinbase) branches
+    where doubleHash = S.hash . S.hash
 
 -- | Change Text hex string to bytes
 fromHex :: T.Text -> B.ByteString
 fromHex = fst . B16.decode . T.encodeUtf8
+
+toHex :: B.ByteString -> T.Text
+toHex = T.decodeUtf8 . B16.encode
 
 -- | Hashrate, accepts per minute, difficulty conversion functions
 ah2d :: Double -> Double -> Double
@@ -134,4 +152,4 @@ ad2h :: Double -> Double -> Double
 ad2h a d = (1073741824 * a * d) / 15
 
 targetToDifficulty :: Integer -> Double
-targetToDifficulty target = (0xffff0000 * 2^(256-64) + 1) / (fromInteger target + 1.0)
+targetToDifficulty target = 26959535291011309493156476344723991336010898738574164086137773096961.0 / (fromInteger target + 1.0)

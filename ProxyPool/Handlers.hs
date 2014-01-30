@@ -22,32 +22,27 @@ import System.Log.Logger
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow ((&&&))
 
-import Control.Monad (forever, join, when)
+import Control.Monad (forever, join, when, unless)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either
 
-import Control.Concurrent (forkIO, ThreadId, killThread)
-import Control.Concurrent.MVar
+import Control.Concurrent (forkIO, ThreadId, killThread, threadDelay)
 import Control.Concurrent.Chan
 
 import Data.IORef
 import Data.Aeson
 
 import Data.Monoid ((<>))
-import Text.Printf
 
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.Lazy.Builder as TL
 import qualified Data.Text.Lazy.Encoding as TL
 
-import qualified Data.ByteString as BS
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy.Builder as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
-
-import qualified Data.HashTable.IO as H
-
-type HashTable k v = H.BasicHashTable k v
 
 data HandlerState
     = HandlerState { _handle   :: Handle
@@ -56,67 +51,70 @@ data HandlerState
 
 data ServerState
     = ServerState { s_handler    :: HandlerState
-                  , s_writerChan :: Chan BS.ByteString
+                  , s_writerChan :: Chan B.ByteString
                   }
 
 data ClientState
     = ClientState { c_handler      :: HandlerState
-                  , c_currentNonce :: IORef Integer
-                  , c_writerChan   :: Chan BS.ByteString
+                  , c_writerChan   :: Chan B.ByteString
+                  , c_job          :: IORef Job
+                  , c_difficulty   :: IORef Double
+                  -- | Number of shares submitted by the client since last vardiff retarget
+                  , c_lastShares   :: IORef Int
                   }
 
 data ServerSettings
-    = ServerSettings { _username        :: T.Text
-                     , _password        :: T.Text
-                     , _extraNonce2Size :: Int
-                     , _extraNonce3Size :: Int
+    = ServerSettings { _username            :: T.Text
+                     , _password            :: T.Text
+                     -- | Size of the new en2
+                     , _extraNonce2Size     :: Int
+                     -- | Size of the new en3
+                     , _extraNonce3Size     :: Int
+                     -- | Time (s) between vardiff updates
+                     , _vardiffRetargetTime :: Int
+                     -- | Target shares retarget time
+                     , _vardiffTarget       :: Int
+                     -- | Allow variances to be within this range
+                     , _vardiffAllowance    :: Double
+                     -- | Minimum allowable difficulty
+                     , _vardiffMin          :: Double
                      } deriving (Show)
 
 data GlobalState
     = GlobalState { _nonceCounter   :: IORef Integer
                   , _matchCounter   :: IORef Integer
-                  -- | Matches server responses with a handler
-                  , _matches        :: HashTable Integer (StratumResponse -> IO ())
-                  -- | HashTable is not thread safe, thread must aquire lock first
-                  , _matchesLock    :: MVar ()
                   -- | Channel for notifications
                   , _notifyChan     :: Chan StratumResponse
                   -- | Channel for upstream requests
                   , _upstreamChan   :: Chan Request
+                  , _upstreamDiff   :: IORef Double
+                  , _currentWork    :: IORef Work
                   , _settings       :: ServerSettings
                   }
 
+data Job
+    = Job { _jobID  :: T.Text
+          , _nonce1 :: (Integer, Int)
+          , _nonce2 :: (Integer, Int)
+          }
+    deriving (Show)
+
 -- | Send request to upstream, taking the request and a callback
-upstreamRequest :: GlobalState -> StratumRequest -> (StratumResponse -> IO ()) -> IO ()
-upstreamRequest global request callback = do
+upstreamRequest :: GlobalState -> StratumRequest -> IO ()
+upstreamRequest global request = do
     -- generate a new request ID
     rid <- atomicModifyIORef' (_matchCounter global) $ join (&&&) (1+)
-    -- save the callback
-    withMVar (_matchesLock global) $ const $ H.insert (_matches global) rid callback
     -- send request to the upstream listener
     writeChan (_upstreamChan global) $ Request (Number . fromInteger $ rid) request
 
--- | Run the callback when an upstream response has arrived
-upstreamResponse :: GlobalState -> Integer -> StratumResponse -> IO ()
-upstreamResponse global rid resp = do
-    callback <- withMVar (_matchesLock global) $ const $ do
-        result <- H.lookup (_matches global) rid
-        case result of
-            Just cb -> do
-                H.delete (_matches global) rid
-                return cb
-            Nothing -> return $ const $ warningM "upstream" $ "Invalid rid: " ++ show rid ++ " " ++ show resp
-
-    callback resp
-
 initaliseGlobal :: ServerSettings -> IO GlobalState
-initaliseGlobal settings = GlobalState     <$>
-                           newIORef 0      <*>
-                           newIORef 0      <*>
-                           H.new           <*>
-                           newMVar ()      <*>
-                           newChan         <*>
-                           newChan         <*>
+initaliseGlobal settings = GlobalState        <$>
+                           newIORef 0         <*>
+                           newIORef 0         <*>
+                           newChan            <*>
+                           newChan            <*>
+                           newIORef 0.0       <*>
+                           newIORef emptyWork <*>
                            return settings
 
 initaliseHandler :: Handle -> IO HandlerState
@@ -129,10 +127,12 @@ finaliseHandler state = do
 
 -- | Initalises client state
 initaliseClient :: Handle -> GlobalState -> IO ClientState
-initaliseClient handle _ = ClientState             <$>
-                           initaliseHandler handle <*>
-                           newIORef 0              <*>
-                           newChan
+initaliseClient handle _ = ClientState                   <$>
+                           initaliseHandler handle       <*>
+                           newChan                       <*>
+                           newIORef (Job "" (0,0) (0,0)) <*>
+                           newIORef 0.000488             <*>
+                           newIORef 0
 
 recordChild :: HandlerState -> ThreadId -> IO ()
 recordChild handler tid = modifyIORef' (_children $ handler) (tid:)
@@ -140,7 +140,7 @@ recordChild handler tid = modifyIORef' (_children $ handler) (tid:)
 process :: (Monad m, MonadIO m, FromJSON a) => Handle -> (Maybe a -> EitherT b m ()) -> m b
 process handle f = do
     result <- runEitherT $ forever $ do
-        line <- liftIO $ BS.hGetLine $ handle
+        line <- liftIO $ B.hGetLine $ handle
         f $ decodeStrict line
 
     return $ either id (error "impossible") result
@@ -158,7 +158,7 @@ handleClient global local = do
         writeResponse :: Value -> StratumResponse -> IO ()
         writeResponse rid resp = writeResponseRaw $ BL.toStrict . encode $ Response rid resp
 
-        writeResponseRaw :: BS.ByteString -> IO ()
+        writeResponseRaw :: B.ByteString -> IO ()
         writeResponseRaw = writeChan (c_writerChan local)
 
         en2Size :: Int
@@ -168,7 +168,7 @@ handleClient global local = do
         nextNonce = atomicModifyIORef' (_nonceCounter global) $ join (&&&) $ \x -> (x + 1) `mod` (2 ^ (8 * en2Size))
 
         packEn2 :: Integer -> T.Text
-        packEn2 nonce = T.pack $ printf "%0*x" en2Size nonce
+        packEn2 nonce = toHex $ BL.toStrict $ B.toLazyByteString $ packIntLE nonce en2Size
 
         handle :: Handle
         handle = _handle . c_handler $ local
@@ -196,6 +196,14 @@ handleClient global local = do
                 -- get generate unique client nonce
                 nonce <- nextNonce
 
+                -- change the current job
+                atomicWriteIORef (c_job local) $ Job job (unpackIntLE . fromHex $ extraNonce1, T.length extraNonce1 `quot` 2) (nonce, en2Size)
+
+                -- set difficulty
+                diff <- readIORef $ c_difficulty local
+                writeResponse Null $ SetDifficulty $ diff * 65536
+
+                -- set the work
                 writeResponseRaw $ BL.toStrict $ TL.encodeUtf8 $ TL.toLazyText $ foldr1 (<>) $ map TL.fromText
                     [ "{\"id\":null,\"error\":null,\"method\":\"mining.notify\",\"params\":["
                     , "\"", job, "\","
@@ -212,10 +220,9 @@ handleClient global local = do
                     , "]}"
                     ]
 
-                atomicWriteIORef (c_currentNonce local) nonce
-
-            sd@(SetDifficulty{}) -> liftIO $ writeResponse Null sd
-            _ -> error "Invalid notify command"
+            -- cap vardiff at upstream difficulty
+            SetDifficulty diff -> liftIO $ atomicModifyIORef (c_difficulty local) $ max (diff / 65536) &&& const ()
+            _ -> return ()
 
     -- wait for mining.authorization call
     user <- process handle $ \case
@@ -224,22 +231,66 @@ handleClient global local = do
             finish user
         _ -> continue
 
-    infoM "client" $ T.unpack $ "Client " <> user <> " authorized"
+    infoM "client" $ T.unpack $ "Client " <> user <> " connected"
+
+    -- vardiff thread
+    (recordChild (c_handler local) =<<) . forkIO . forever $ do
+        let retargetTime     = _vardiffRetargetTime . _settings $ global
+            target           = _vardiffTarget       . _settings $ global
+            targetAllowance  = _vardiffAllowance    . _settings $ global
+            minDifficulty    = _vardiffMin          . _settings $ global
+
+        -- wait till retarget
+        threadDelay $ retargetTime * 10^(6 :: Integer)
+
+        accepted    <- fromIntegral <$> (readIORef $ c_lastShares local)
+        currentDiff <- readIORef $ c_difficulty local
+
+        -- convert accepted shares, difficulty to hashrate
+        let estimatedHash = ad2h (accepted            * (60 / fromIntegral retargetTime)) currentDiff
+            currentHash   = ad2h (fromIntegral target * (60 / fromIntegral retargetTime)) currentDiff
+
+        -- check if hashrate is in vardiff allowance
+        unless (currentHash * (1 - targetAllowance) < estimatedHash && estimatedHash < currentHash * (1 + targetAllowance)) $ do
+            upstreamDiff <- readIORef $ _upstreamDiff global
+            -- cap difficulty to min and upstream
+            let newDiff = min (max minDifficulty $ ah2d (fromIntegral target * (60 / fromIntegral retargetTime)) estimatedHash) upstreamDiff
+
+            writeIORef (c_difficulty local) newDiff
+            writeResponse Null $ SetDifficulty $ newDiff * 65536
+
+        -- clear the share counter
+        writeIORef (c_lastShares local) 0
 
     -- process workers submissions (forever)
     process handle $ \case
-        Just (Request rid req) -> liftIO $ do
-            -- prepend the nonce
-            nonce <- readIORef $ c_currentNonce local
-            -- generate a new server request
-            upstreamRequest global (req { s_extraNonce2 = packEn2 nonce <> s_extraNonce2 req }) $ \resp -> do
-                -- record if share was accepted
-                case resp of
-                    General (Right _) -> debugM "share" $ T.unpack $ "Share accepted " <> user
-                    General (Left _)  -> debugM "share" $ T.unpack $ "Share rejected " <> user
-                    _ -> return ()
+        Just (Request rid sub@(Submit{})) -> liftIO $ do
+            job  <- readIORef $ c_job local
+            diff <- readIORef $ c_difficulty local
+            work <- readIORef $ _currentWork global
 
-                writeResponse rid resp
+            let submitDiff = targetToDifficulty $ getPOW sub work (_nonce1 job) (_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
+
+            -- verify job and share difficulty
+            if s_job sub == _jobID job && submitDiff >= diff
+                then do
+                    -- check if it meets upstream difficulty
+                    upstreamDiff <- readIORef $ _upstreamDiff global
+
+                    -- submit share to upstream
+                    when (submitDiff >= upstreamDiff) $ upstreamRequest global (sub { s_extraNonce2 = packEn2 (fst . _nonce2 $ job) <> s_extraNonce2 sub })
+
+                    -- write response
+                    writeResponse rid $ General $ Right $ Bool True
+                else do
+                -- stale or invalid
+                    writeResponse rid $ General $ Left $ Bool False
+
+            -- TODO share logging
+
+            -- record share for vardiff
+            atomicModifyIORef' (c_lastShares local) $ (1+) &&& const ()
+
         _ -> continue
 
 finaliseClient :: ClientState -> IO ()
@@ -290,9 +341,15 @@ handleServer global local = do
     -- thread to listen for server notifications
     (recordChild (s_handler local) =<<) . forkIO $ do
         process handle $ liftIO . \case
-            Just (Response _ wn@(WorkNotify{})) -> writeChan (_notifyChan global) $ wn { wn_extraNonce1 = extraNonce1, wn_originalEn2Size = originalEn2Size }
-            Just (Response _ sd@(SetDifficulty{})) -> writeChan (_notifyChan global) sd
-            Just (Response (Number rid) gn@(General{})) -> upstreamResponse global (floor rid) gn
+            Just (Response _ wn@(WorkNotify{})) -> do
+                case fromWorkNotify wn of
+                    Just work -> do
+                        writeIORef (_currentWork global) work
+                        writeChan (_notifyChan global) $ wn { wn_extraNonce1 = extraNonce1, wn_originalEn2Size = originalEn2Size }
+                    Nothing   -> errorM "server" "Invalid upstream work received"
+            Just (Response _ (SetDifficulty diff)) -> atomicWriteIORef (_upstreamDiff global) (diff / 65536)
+            Just (Response (Number _) (General (Right _))) -> debugM "share" $ "Upstream share accepted"
+            Just (Response (Number _) (General (Left  _))) -> debugM "share" $ "Upstream share rejected"
             _ -> return ()
 
     -- thread to listen to client requests (forever)

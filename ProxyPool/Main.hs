@@ -5,9 +5,9 @@ module Main where
 import ProxyPool.Network (configureKeepAlive, connectTimeout)
 import ProxyPool.Handlers
 
-import Control.Monad (forever)
+import Control.Monad (forever, mzero)
 import Control.Exception (bracket, catch, IOException)
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, ThreadId)
 import Control.Applicative ((<$>))
 
 import System.Posix.Signals (installHandler, sigPIPE, Handler(..))
@@ -22,6 +22,9 @@ import Data.Word
 
 import Network
 import Network.Socket hiding (accept)
+
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Maybe
 
 -- | Manage incoming connections
 listenDownstream :: GlobalState -> Word16 -> IO ()
@@ -48,8 +51,8 @@ listenDownstream state port = do
     return ()
 
 -- | Handles connection to upstream pool server
-runUpstream :: GlobalState -> String -> Int -> IO ()
-runUpstream state url port = forever $ do
+runUpstream :: GlobalState -> String -> Int -> IO ThreadId
+runUpstream state url port = forkIO $ forever $ do
     upstream <- getAddrInfo
                     (Just $ defaultHints { addrFamily = AF_INET, addrSocketType = Stream })
                     (Just url)
@@ -84,7 +87,11 @@ main = withSocketsDo $ do
     updateGlobalLogger rootLoggerName $ setLevel DEBUG . setHandlers [logger]
 
     -- create the global state
-    state <- initaliseGlobal $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc" "anything" 2 2
+    state <- initaliseGlobal $ ServerSettings "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc+0.000500" "anything" 2 2 180 10 0.25 0.000448
 
     listenDownstream state 9555
-    runUpstream state "pool.doge.st" 9555
+    _ <- runUpstream state "pool.doge.st" 9555
+
+    -- hack to get control-c working
+    _ <- getLine
+    return ()

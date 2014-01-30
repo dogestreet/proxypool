@@ -30,6 +30,7 @@ tests = testGroup "POW" [ testCase "packInt" packIntSpec
                         , testCase "unpackBE" unpackBESpec
                         , testCase "scrypt" scryptSpec
                         , testCase "submit" submitSpec
+                        , testCase "toFromHex" toFromHexSpec
                         ]
 packIntSpec :: Spec
 packIntSpec = describe "Pack integers correctly" $ do
@@ -85,3 +86,9 @@ submitSpec = do
             getPOW submit1 work (0,0) (0,0) 4 scrypt `shouldBe` 177255867332298474018030488111423928422388421620745826718848526711306920
         it "Correct result 2" $ do
             getPOW submit2 work (0,0) (0,0) 4 scrypt `shouldBe` 72403129310559102547847627028645412322991108406547291525128594607097300
+
+toFromHexSpec :: Spec
+toFromHexSpec = do
+    describe "toHex/fromHex isomorphism" $ do
+        it "Correct result 1" $ do
+            (toHex . fromHex $ "0001020304050607") `shouldBe` "0001020304050607"
