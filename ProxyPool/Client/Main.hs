@@ -29,7 +29,7 @@ main = do
     -- run 1000 connections
     replicateM_ 1000 runClient
     -- for 5 minutes
-    threadDelay $ 60 * 6 * 10^(6 :: Integer)
+    threadDelay $ 60 * 5 * 10^(6 :: Integer)
 
 runClient :: IO ThreadId
 runClient = forkIO $ do

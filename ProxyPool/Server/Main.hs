@@ -5,7 +5,7 @@ module Main where
 import ProxyPool.Network (configureKeepAlive, connectTimeout)
 import ProxyPool.Handlers
 
-import Control.Monad (forever)
+import Control.Monad (forever, mzero, when)
 import Control.Exception (bracket, catch, IOException)
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Applicative ((<$>))
@@ -22,6 +22,9 @@ import Data.Word
 
 import Network
 import Network.Socket hiding (accept)
+
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Maybe
 
 -- | Manage incoming connections
 listenDownstream :: GlobalState -> Word16 -> IO ()
@@ -90,5 +93,8 @@ main = withSocketsDo $ do
     _ <- runUpstream state "pool.doge.st" 9555
 
     -- hack to get control-c working
-    _ <- getLine
+    _ <- runMaybeT $ forever $ do
+        xs <- liftIO getLine
+        when (xs == "exit") mzero
+
     return ()

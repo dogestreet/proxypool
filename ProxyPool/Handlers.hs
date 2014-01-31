@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns #-}
 module ProxyPool.Handlers (
     initaliseGlobal,
 
@@ -93,9 +93,9 @@ data GlobalState
                   }
 
 data Job
-    = Job { _jobID  :: T.Text
-          , _nonce1 :: (Integer, Int)
-          , _nonce2 :: (Integer, Int)
+    = Job { _jobID  :: !T.Text
+          , _nonce1 :: {-# UNPACK #-} !(Integer, Int)
+          , _nonce2 :: {-# UNPACK #-} !(Integer, Int)
           }
     deriving (Show)
 
@@ -345,6 +345,7 @@ handleServer global local = do
     (recordChild (s_handler local) =<<) . forkIO $ do
         process handle $ liftIO . \case
             Just (Response _ wn@(WorkNotify{})) -> do
+                return ()
                 case fromWorkNotify wn of
                     Just work -> do
                         writeIORef (_currentWork global) work
