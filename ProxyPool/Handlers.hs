@@ -10,6 +10,8 @@ module ProxyPool.Handlers (
     handleServer,
     finaliseServer,
 
+    handleShareLogging,
+
     GlobalState,
     ServerSettings(..)) where
 
@@ -22,7 +24,7 @@ import System.Log.Logger
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow ((&&&))
 
-import Control.Monad (forever, join, when, unless)
+import Control.Monad (forever, join, when, unless, mzero)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either
 
@@ -31,6 +33,7 @@ import Control.Concurrent.Chan
 
 import Data.IORef
 import Data.Aeson
+import Data.Word
 
 import Data.Monoid ((<>))
 
@@ -43,6 +46,8 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Builder as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
+
+import qualified Database.Redis as R
 
 data HandlerState
     = HandlerState { _handle   :: Handle
@@ -61,11 +66,28 @@ data ClientState
                   , c_difficulty   :: IORef Double
                   -- | Number of shares submitted by the client since last vardiff retarget
                   , c_lastShares   :: IORef Int
+                  -- | Uniquely identifies this client
+                  , c_id           :: !Integer
                   }
 
 data ServerSettings
-    = ServerSettings { _username            :: T.Text
+    = ServerSettings { _serverName          :: T.Text
+                     -- | Host name of the upstream pool
+                     , _upstreamHost        :: T.Text
+                     -- | Port of the upstream pool
+                     , _upstreamPort        :: Word16
+                     -- | Port to listen to for workers
+                     , _localPort           :: Word16
+                     -- | Username to login to upstream pool
+                     , _username            :: T.Text
+                     -- | Password to login to upstream pool
                      , _password            :: T.Text
+                     -- | Using redis to pubsub shares
+                     , _redisHost           :: T.Text
+                     -- | Authentication for redis
+                     , _redisAuth           :: Maybe T.Text
+                     -- | The redis channel to publish to
+                     , _redisChanName       :: T.Text
                      -- | Size of the new en2
                      , _extraNonce2Size     :: Int
                      -- | Size of the new en3
@@ -80,41 +102,68 @@ data ServerSettings
                      , _vardiffMin          :: Double
                      } deriving (Show)
 
+instance FromJSON ServerSettings where
+    parseJSON (Object v) = ServerSettings             <$>
+                           v .: "serverName"          <*>
+                           v .: "upstreamHost"        <*>
+                           v .: "upstreamPort"        <*>
+                           v .: "localPort"           <*>
+                           v .: "username"            <*>
+                           v .: "password"            <*>
+                           v .: "redisHost"           <*>
+                           v .: "redisAuth"           <*>
+                           v .: "redisChanName"       <*>
+                           v .: "extraNonce2Size"     <*>
+                           v .: "extraNonce3Size"     <*>
+                           v .: "vardiffRetargetTime" <*>
+                           v .: "vardiffTarget"       <*>
+                           v .: "vardiffAllowance"    <*>
+                           v .: "vardiffMin"
+    parseJSON _          = mzero
+
 data GlobalState
-    = GlobalState { _nonceCounter   :: IORef Integer
+    = GlobalState { _clientCounter  :: IORef Integer
+                  , _nonceCounter   :: IORef Integer
                   , _matchCounter   :: IORef Integer
+                  , _upstreamDiff   :: IORef Double
+                  , _currentWork    :: IORef Work
                   -- | Channel for notifications
                   , _notifyChan     :: Chan StratumResponse
                   -- | Channel for upstream requests
                   , _upstreamChan   :: Chan Request
-                  , _upstreamDiff   :: IORef Double
-                  , _currentWork    :: IORef Work
+                  -- | Channel for share logging broadcasts
+                  , _shareChan      :: Chan Share
                   , _settings       :: ServerSettings
                   }
 
 data Job
-    = Job { _jobID  :: !T.Text
-          , _nonce1 :: {-# UNPACK #-} !(Integer, Int)
-          , _nonce2 :: {-# UNPACK #-} !(Integer, Int)
+    = Job { j_jobID  :: !T.Text
+          , j_nonce1 :: {-# UNPACK #-} !(Integer, Int)
+          , j_nonce2 :: {-# UNPACK #-} !(Integer, Int)
           }
     deriving (Show)
 
--- | Send request to upstream, taking the request and a callback
-upstreamRequest :: GlobalState -> StratumRequest -> IO ()
-upstreamRequest global request = do
-    -- generate a new request ID
-    rid <- atomicModifyIORef' (_matchCounter global) $ join (&&&) (1+)
-    -- send request to the upstream listener
-    writeChan (_upstreamChan global) $ Request (Number . fromInteger $ rid) request
+data Share
+    = Share { sh_submitter  :: !T.Text
+            , sh_difficulty :: !Double
+            , sh_server     :: !T.Text
+            , sh_valid      :: !Bool
+            }
+
+-- | Increments an IORef counter
+incr :: IORef Integer -> IO Integer
+incr counter = atomicModifyIORef' counter $ join (&&&) (1+)
 
 initaliseGlobal :: ServerSettings -> IO GlobalState
 initaliseGlobal settings = GlobalState        <$>
                            newIORef 0         <*>
                            newIORef 0         <*>
-                           newChan            <*>
-                           newChan            <*>
+                           newIORef 0         <*>
                            newIORef 0.0       <*>
                            newIORef emptyWork <*>
+                           newChan            <*>
+                           newChan            <*>
+                           newChan            <*>
                            return settings
 
 initaliseHandler :: Handle -> IO HandlerState
@@ -127,12 +176,13 @@ finaliseHandler state = do
 
 -- | Initalises client state
 initaliseClient :: Handle -> GlobalState -> IO ClientState
-initaliseClient handle _ = ClientState                   <$>
-                           initaliseHandler handle       <*>
-                           newChan                       <*>
-                           newIORef (Job "" (0,0) (0,0)) <*>
-                           newIORef 0.000488             <*>
-                           newIORef 0
+initaliseClient handle global = ClientState                   <$>
+                                initaliseHandler handle       <*>
+                                newChan                       <*>
+                                newIORef (Job "" (0,0) (0,0)) <*>
+                                newIORef 0.000488             <*>
+                                newIORef 0                    <*>
+                                incr (_clientCounter global)
 
 recordChild :: HandlerState -> ThreadId -> IO ()
 recordChild handler tid = modifyIORef' (_children $ handler) (tid:)
@@ -173,6 +223,14 @@ handleClient global local = do
         handle :: Handle
         handle = _handle . c_handler $ local
 
+        -- | Send request to upstream, taking the request and a callback
+        upstreamRequest :: StratumRequest -> IO ()
+        upstreamRequest request = do
+            -- generate a new request ID
+            rid <- incr $ _matchCounter global
+            -- send request to the upstream listener
+            writeChan (_upstreamChan global) $ Request (Number . fromInteger $ rid) request
+
     -- thread to sequence writes
     (recordChild (c_handler local) =<<) . forkIO . forever $ do
         line <- readChan (c_writerChan local)
@@ -188,12 +246,12 @@ handleClient global local = do
             finish ()
         _ -> continue
 
-    -- duplicate server notification channel
-    localNotifyChan <- dupChan (_notifyChan global)
-
     -- proxy server notifications
-    (recordChild (c_handler local) =<<) . forkIO . forever $ do
-        readChan localNotifyChan >>= \case
+    (recordChild (c_handler local) =<<) . forkIO $ do
+        -- duplicate server notification channel
+        localNotifyChan <- dupChan (_notifyChan global)
+
+        forever $ readChan localNotifyChan >>= \case
             -- coinbase1 is usually massive, so appending at the back will cost us a lot, we'll have to hand serialise this
             WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean extraNonce1 _ -> liftIO $ do
                 -- get generate unique client nonce
@@ -228,6 +286,7 @@ handleClient global local = do
             _ -> return ()
 
     -- wait for mining.authorization call
+    -- TODO: Ensure username is valid payout address
     user <- process handle $ \case
         Just (Request rid (Authorize user _)) -> do
             liftIO $ writeResponse rid $ General $ Right $ Bool True
@@ -272,16 +331,16 @@ handleClient global local = do
             diff <- readIORef $ c_difficulty local
             work <- readIORef $ _currentWork global
 
-            let submitDiff = targetToDifficulty $ getPOW sub work (_nonce1 job) (_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
+            let submitDiff = targetToDifficulty $ getPOW sub work (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
 
             -- verify job and share difficulty
-            if s_job sub == _jobID job && submitDiff >= diff
+            if s_job sub == j_jobID job && submitDiff >= diff
                 then do
                     -- check if it meets upstream difficulty
                     upstreamDiff <- readIORef $ _upstreamDiff global
 
                     -- submit share to upstream
-                    when (submitDiff >= upstreamDiff) $ upstreamRequest global (sub { s_extraNonce2 = packEn2 (fst . _nonce2 $ job) <> s_extraNonce2 sub })
+                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
 
                     -- write response
                     writeResponse rid $ General $ Right $ Bool True
@@ -361,3 +420,6 @@ handleServer global local = do
 
 finaliseServer :: ServerState -> IO ()
 finaliseServer = finaliseHandler . s_handler
+
+handleShareLogging :: GlobalState -> R.Connection -> IO ()
+handleShareLogging global conn = return ()
