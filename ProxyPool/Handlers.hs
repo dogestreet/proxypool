@@ -137,18 +137,26 @@ data GlobalState
                   }
 
 data Job
-    = Job { j_jobID  :: !T.Text
+    = Job { j_jobID  :: {-# UNPACK #-} !T.Text
           , j_nonce1 :: {-# UNPACK #-} !(Integer, Int)
           , j_nonce2 :: {-# UNPACK #-} !(Integer, Int)
           }
     deriving (Show)
 
 data Share
-    = Share { sh_submitter  :: !T.Text
-            , sh_difficulty :: !Double
-            , sh_server     :: !T.Text
-            , sh_valid      :: !Bool
+    = Share { sh_submitter  :: {-# UNPACK #-} !T.Text
+            , sh_difficulty :: {-# UNPACK #-} !Double
+            , sh_server     :: {-# UNPACK #-} !T.Text
+            , sh_valid      ::                !Bool
             }
+    deriving (Show)
+
+instance ToJSON Share where
+    toJSON (Share sub diff srv valid) = object [ "sub"   .= sub
+                                               , "diff"  .= diff
+                                               , "srv"   .= srv
+                                               , "valid" .= valid
+                                               ]
 
 -- | Increments an IORef counter
 incr :: IORef Integer -> IO Integer
@@ -334,7 +342,7 @@ handleClient global local = do
             let submitDiff = targetToDifficulty $ getPOW sub work (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
 
             -- verify job and share difficulty
-            if s_job sub == j_jobID job && submitDiff >= diff
+            valid <- if s_job sub == j_jobID job && submitDiff >= diff
                 then do
                     -- check if it meets upstream difficulty
                     upstreamDiff <- readIORef $ _upstreamDiff global
@@ -344,11 +352,14 @@ handleClient global local = do
 
                     -- write response
                     writeResponse rid $ General $ Right $ Bool True
+                    return True
                 else do
                 -- stale or invalid
                     writeResponse rid $ General $ Left $ Bool False
+                    return False
 
-            -- TODO share logging
+            -- log the share
+            writeChan (_shareChan global) $ Share user submitDiff (_serverName . _settings $ global) valid
 
             -- record share for vardiff
             atomicModifyIORef' (c_lastShares local) $ (1+) &&& const ()
@@ -421,5 +432,12 @@ handleServer global local = do
 finaliseServer :: ServerState -> IO ()
 finaliseServer = finaliseHandler . s_handler
 
+-- | Sends the share to Redis
 handleShareLogging :: GlobalState -> R.Connection -> IO ()
-handleShareLogging global conn = return ()
+handleShareLogging global conn = do
+    let channel = T.encodeUtf8 $ _redisChanName . _settings $ global
+    forever $ readChan (_shareChan global) >>= \share -> do
+        result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
+        case result of
+            Left (R.Error xs) -> errorM "sharelogger" $ "Error while publishing share (" ++ show share ++ "): " ++ B8.unpack xs
+            _                 -> return ()

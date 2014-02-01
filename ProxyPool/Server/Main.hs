@@ -26,6 +26,7 @@ import Data.Aeson
 import Data.Text as T
 import Data.Text.Encoding as T
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 
 import Network
@@ -63,11 +64,19 @@ runShareLogger :: GlobalState -> String -> Maybe B.ByteString -> IO ThreadId
 runShareLogger global host auth = forkIO $ forever $ do
     infoM "sharelogger" $ "Connecting to " ++  host
     conn <- R.connect $ R.defaultConnectInfo { R.connectHost = host, R.connectAuth = auth }
-    handleShareLogging global conn `catches` [ Handler $ \(e :: IOException) -> warningM "sharelogger" $ "IOException in sharelogger: " ++ show e
-                                             , Handler $ \(_ :: R.ConnectionLostException) -> warningM "sharelogger" "Redis connection lost"
-                                             ]
 
-    threadDelay $ 5000 * 10^(6 :: Int)
+    -- test connection
+    reply <- R.runRedis conn R.ping
+    case reply of
+        Left (R.Error xs) -> errorM "sharelogger" $ "Error testing Redis connection " ++ B8.unpack xs
+        _                 -> do
+            infoM "sharelogger" "Redis connected"
+            handleShareLogging global conn `catches` [ Handler $ \(e :: IOException) -> warningM "sharelogger" $ "IOException in sharelogger: " ++ show e
+                                                     , Handler $ \(_ :: R.ConnectionLostException) -> warningM "sharelogger" "Redis connection lost"
+                                                     ]
+
+    warningM "sharelogger" "Sleeping for 5 seconds before reconnection"
+    threadDelay $ 5 * 10^(6 :: Int)
 
 -- | Handles connection to upstream pool server
 runUpstream :: GlobalState -> String -> Word16 -> IO ThreadId
@@ -96,7 +105,8 @@ runUpstream global url port = forkIO $ forever $ do
                    (handleServer global)
                `catch` \(e :: IOException) -> warningM "server" $ "IOException in server: " ++ show e
 
-    threadDelay $ 5000 * 10^(6 :: Int)
+    warningM "server" "Sleeping for 5 seconds before reconnection"
+    threadDelay $ 5 * 10^(6 :: Int)
 
 main :: IO ()
 main = withSocketsDo $ do
