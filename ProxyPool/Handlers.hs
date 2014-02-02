@@ -1,19 +1,21 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns, DeriveDataTypeable #-}
 module ProxyPool.Handlers (
-    initaliseGlobal,
+    initaliseGlobal
+  , initaliseClient
+  , handleClient
+  , finaliseClient
 
-    initaliseClient,
-    handleClient,
-    finaliseClient,
+  , initaliseServer
+  , handleServer
+  , finaliseServer
 
-    initaliseServer,
-    handleServer,
-    finaliseServer,
+  , handleShareLogging
 
-    handleShareLogging,
+  , GlobalState
+  , ServerSettings(..)
 
-    GlobalState,
-    ServerSettings(..)) where
+  , KillClientException
+) where
 
 import ProxyPool.Stratum
 import ProxyPool.Mining
@@ -28,12 +30,17 @@ import Control.Monad (forever, join, when, unless, mzero)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either
 
-import Control.Concurrent (forkIO, ThreadId, killThread, threadDelay)
+import Control.Exception hiding (handle)
+
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan
+import Control.Concurrent.Async
 
 import Data.IORef
 import Data.Aeson
 import Data.Word
+import Data.Typeable
+import qualified Data.Vector as V
 
 import Data.Monoid ((<>))
 
@@ -51,7 +58,7 @@ import qualified Database.Redis as R
 
 data HandlerState
     = HandlerState { _handle   :: Handle
-                   , _children :: IORef [ThreadId]
+                   , _children :: IORef [Async ()]
                    }
 
 data ServerState
@@ -60,12 +67,14 @@ data ServerState
                   }
 
 data ClientState
-    = ClientState { c_handler      :: HandlerState
-                  , c_writerChan   :: Chan B.ByteString
-                  , c_job          :: IORef Job
-                  , c_difficulty   :: IORef Double
+    = ClientState { c_handler          :: HandlerState
+                  , c_writerChan       :: Chan B.ByteString
+                  , c_job              :: IORef Job
+                  , c_difficulty       :: IORef Double
                   -- | Number of shares submitted by the client since last vardiff retarget
-                  , c_lastShares   :: IORef Int
+                  , c_lastShares       :: IORef Int
+                  -- | Number of dead shares submitted by the client since last vardiff retarget
+                  , c_lastSharesDead   :: IORef Int
                   -- | Uniquely identifies this client
                   , c_id           :: !Integer
                   }
@@ -88,6 +97,8 @@ data ServerSettings
                      , _redisAuth           :: Maybe T.Text
                      -- | The redis channel to publish to
                      , _redisChanName       :: T.Text
+                     -- | The byte prepended to the public key, used to verify miner addresses, 0 for Bitcoin, 30 for Dogecoin
+                     , _publickeyByte       :: Word8
                      -- | Size of the new en2
                      , _extraNonce2Size     :: Int
                      -- | Size of the new en3
@@ -113,6 +124,7 @@ instance FromJSON ServerSettings where
                            v .: "redisHost"           <*>
                            v .: "redisAuth"           <*>
                            v .: "redisChanName"       <*>
+                           v .: "publicKeyByte"       <*>
                            v .: "extraNonce2Size"     <*>
                            v .: "extraNonce3Size"     <*>
                            v .: "vardiffRetargetTime" <*>
@@ -149,7 +161,7 @@ data Share
             , sh_server     :: {-# UNPACK #-} !T.Text
             , sh_valid      ::                !Bool
             }
-    deriving (Show)
+    deriving (Show, Typeable)
 
 instance ToJSON Share where
     toJSON (Share sub diff srv valid) = object [ "sub"   .= sub
@@ -157,6 +169,11 @@ instance ToJSON Share where
                                                , "srv"   .= srv
                                                , "valid" .= valid
                                                ]
+
+-- | Used to deliberately terminate the client thread
+data KillClientException = KillClientException { _reason :: String } deriving (Show, Typeable)
+
+instance Exception KillClientException
 
 -- | Increments an IORef counter
 incr :: IORef Integer -> IO Integer
@@ -180,7 +197,7 @@ initaliseHandler handle = HandlerState <$> return handle <*> newIORef []
 finaliseHandler :: HandlerState -> IO ()
 finaliseHandler state = do
     hClose $ _handle state
-    readIORef (_children state) >>= mapM_ killThread
+    readIORef (_children state) >>= mapM_ cancel
 
 -- | Initalises client state
 initaliseClient :: Handle -> GlobalState -> IO ClientState
@@ -190,10 +207,12 @@ initaliseClient handle global = ClientState                   <$>
                                 newIORef (Job "" (0,0) (0,0)) <*>
                                 newIORef 0.000488             <*>
                                 newIORef 0                    <*>
+                                newIORef 0                    <*>
                                 incr (_clientCounter global)
 
-recordChild :: HandlerState -> ThreadId -> IO ()
-recordChild handler tid = modifyIORef' (_children $ handler) (tid:)
+-- | Record child threads as well as ensuring child thread death triggers an exception on the parent
+linkChild :: HandlerState -> Async () -> IO ()
+linkChild handler asy = modifyIORef' (_children $ handler) (asy:) >> link asy
 
 process :: (Monad m, MonadIO m, FromJSON a) => Handle -> (Maybe a -> EitherT b m ()) -> m b
 process handle f = do
@@ -240,11 +259,11 @@ handleClient global local = do
             writeChan (_upstreamChan global) $ Request (Number . fromInteger $ rid) request
 
     -- thread to sequence writes
-    (recordChild (c_handler local) =<<) . forkIO . forever $ do
+    (linkChild (c_handler local) =<<) . async . forever $ do
         line <- readChan (c_writerChan local)
         B8.hPutStrLn handle line
 
-    -- TODO: Time out client if non initialisation
+    -- TODO: Time out client if non initalisation
     -- wait for mining.subscription call
     process handle $ \case
         Just (Request rid Subscribe) -> do
@@ -255,7 +274,7 @@ handleClient global local = do
         _ -> continue
 
     -- proxy server notifications
-    (recordChild (c_handler local) =<<) . forkIO $ do
+    (linkChild (c_handler local) =<<) . async $ do
         -- duplicate server notification channel
         localNotifyChan <- dupChan (_notifyChan global)
 
@@ -294,17 +313,23 @@ handleClient global local = do
             _ -> return ()
 
     -- wait for mining.authorization call
-    -- TODO: Ensure username is valid payout address
     user <- process handle $ \case
         Just (Request rid (Authorize user _)) -> do
-            liftIO $ writeResponse rid $ General $ Right $ Bool True
-            finish user
+            let valid = validateAddress (_publickeyByte . _settings $ global) $ T.encodeUtf8 user
+            if valid
+                then do
+                    liftIO $ writeResponse rid $ General $ Right $ Bool True
+                    finish user
+                else do
+                    liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-2), String "Username is not a valid address"]
+                    continue
+
         _ -> continue
 
     infoM "client" $ T.unpack $ "Client " <> user <> " connected"
 
     -- vardiff thread
-    (recordChild (c_handler local) =<<) . forkIO . forever $ do
+    (linkChild (c_handler local) =<<) . async . forever $ do
         let retargetTime     = _vardiffRetargetTime . _settings $ global
             target           = _vardiffTarget       . _settings $ global
             targetAllowance  = _vardiffAllowance    . _settings $ global
@@ -329,8 +354,18 @@ handleClient global local = do
             writeIORef (c_difficulty local) newDiff
             writeResponse Null $ SetDifficulty $ newDiff * 65536
 
-        -- clear the share counter
+        -- check the number of dead this client is submitting
+        lastShares <- readIORef (c_lastShares local)
+        lastSharesDead <- readIORef (c_lastSharesDead local)
+
+        -- ban the client if 90% of submitted shares are dead
+        when (lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastSharesDead :: Double) >= 0.9) $ do
+            -- TODO: log the ban
+            throwIO $ KillClientException "Too many dead shares submitted"
+
+        -- clear the share counters
         writeIORef (c_lastShares local) 0
+        writeIORef (c_lastSharesDead local) 0
 
     -- process workers submissions (forever)
     process handle $ \case
@@ -363,6 +398,7 @@ handleClient global local = do
 
             -- record share for vardiff
             atomicModifyIORef' (c_lastShares local) $ (1+) &&& const ()
+            unless valid $ atomicModifyIORef' (c_lastSharesDead local) $ (1+) &&& const ()
 
         _ -> continue
 
@@ -382,7 +418,7 @@ handleServer global local = do
         writeRequest = writeChan (s_writerChan local) . BL.toStrict . encode
 
     -- thread to sequence writes
-    (recordChild (s_handler local) =<<) . forkIO . forever $ do
+    (linkChild (s_handler local) =<<) . async . forever $ do
         line <- readChan (s_writerChan local)
         B8.hPutStrLn handle line
 
@@ -412,7 +448,7 @@ handleServer global local = do
     infoM "server" "Upstream authorized"
 
     -- thread to listen for server notifications
-    (recordChild (s_handler local) =<<) . forkIO $ do
+    (linkChild (s_handler local) =<<) . async $ do
         process handle $ liftIO . \case
             Just (Response _ wn@(WorkNotify{})) -> do
                 return ()

@@ -1,4 +1,4 @@
-{-# Language CPP, ForeignFunctionInterface, OverloadedStrings #-}
+{-# Language CPP, ForeignFunctionInterface, OverloadedStrings, ScopedTypeVariables #-}
 module ProxyPool.Mining (
     scrypt
   , getPOW
@@ -15,6 +15,8 @@ module ProxyPool.Mining (
   , hd2a
   , ad2h
   , emptyWork
+  , checksumAddress
+  , validateAddress
   , Work (..)
 ) where
 
@@ -37,6 +39,10 @@ import qualified Data.Text.Encoding as T
 
 import Data.Monoid ((<>), mempty, mconcat)
 import Data.Aeson
+import Data.Word ()
+import Data.Char (ord)
+
+import qualified Data.IntMap as IM
 
 import qualified Crypto.Hash.SHA256 as S
 
@@ -131,8 +137,10 @@ packBlockHeader work en1 en2 en3 ntime nonce
 
 -- | Create merkle root
 merkleRoot :: B.ByteString -> [B.ByteString] -> B.ByteString
-merkleRoot coinbase branches = foldl (\acc x -> doubleHash $ acc <> x) (doubleHash coinbase) branches
-    where doubleHash = S.hash . S.hash
+merkleRoot coinbase branches = foldl (\acc x -> doubleSHA $ acc <> x) (doubleSHA coinbase) branches
+
+doubleSHA :: B.ByteString -> B.ByteString
+doubleSHA = S.hash . S.hash
 
 -- | Change Text hex string to bytes
 fromHex :: T.Text -> B.ByteString
@@ -153,3 +161,22 @@ ad2h a d = (1073741824 * a * d) / 15
 
 targetToDifficulty :: Integer -> Double
 targetToDifficulty target = 26959535291011309493156476344723991336010898738574164086137773096961.0 / (fromInteger target + 1.0)
+
+b58Map :: IM.IntMap Integer
+b58Map = IM.fromList $ zip (map ord "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz") [0..]
+
+-- | Verifies the validity of a base58 encoded address using the checksum
+checksumAddress :: Word8 -> B.ByteString -> Bool
+checksumAddress version bs = B.head bytes == version && B.take 4 (doubleSHA (B.take 21 bytes)) == B.drop 21 bytes
+    where value :: Integer = B.foldl' (\acc byte -> acc * 58 + (b58Map IM.! (fromIntegral byte))) 0 bs
+          bytes = B.reverse $ BL.toStrict $ B.toLazyByteString $ packIntLE value 25
+
+-- | Check if the miner's address is valid
+validateAddress :: Word8 -> B.ByteString -> Bool
+validateAddress prepend address = len >= 27 && len <= 34 && B.all (charCheck . fromIntegral) address && checksumAddress prepend address
+    where len = B.length address
+          -- | Verify that only the allowed b58 chars are in the string
+          charCheck :: Int -> Bool
+          charCheck c | c /= ord '0' && c /= ord 'O' && c /= ord 'I' && c /= ord 'l'
+                      = (c >= ord '1' && c <= ord '9') || (c >= ord 'A' && c <= ord 'Z') || (c >= ord 'a' && c <= ord 'z')
+          charCheck _ = False

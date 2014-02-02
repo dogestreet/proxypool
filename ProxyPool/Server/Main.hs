@@ -7,7 +7,7 @@ import ProxyPool.Handlers
 
 import Control.Monad (forever, mzero, when)
 import Control.Exception hiding (handle)
-import Control.Concurrent (forkIO, ThreadId, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Applicative ((<$>))
 
 import System.Environment (getArgs)
@@ -35,10 +35,12 @@ import Network.Socket hiding (accept)
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Maybe
 
+import Control.Concurrent.Async
+
 import qualified Database.Redis as R
 
 -- | Manage incoming connections
-listenDownstream :: GlobalState -> Word16 -> IO ThreadId
+listenDownstream :: GlobalState -> Word16 -> IO (Async ())
 listenDownstream global port = do
     sock <- listenOn $ PortNumber $ fromIntegral port
 
@@ -48,10 +50,10 @@ listenDownstream global port = do
 
     infoM "client" $ "Listening on localhost:" ++ show port
     -- listen for connections on separate thread
-    forkIO . forever $ do
+    async . forever $ do
         (handle, host, remotePort) <- accept sock
         -- handle each incoming connection on a separate thread
-        forkIO $ do
+        async $ do
             infoM "client" $ "Accepted connection from " ++ host ++ ":" ++ show remotePort
             bracket
                 (initaliseClient handle global)
@@ -60,8 +62,8 @@ listenDownstream global port = do
             `catch` \(e :: IOException) -> warningM "client" $ "IOException in client: " ++ show e
 
 -- | Manages publication of shares to Redis
-runShareLogger :: GlobalState -> String -> Maybe B.ByteString -> IO ThreadId
-runShareLogger global host auth = forkIO $ forever $ do
+runShareLogger :: GlobalState -> String -> Maybe B.ByteString -> IO (Async ())
+runShareLogger global host auth = async $ forever $ do
     infoM "sharelogger" $ "Connecting to " ++  host
     conn <- R.connect $ R.defaultConnectInfo { R.connectHost = host, R.connectAuth = auth }
 
@@ -79,8 +81,8 @@ runShareLogger global host auth = forkIO $ forever $ do
     threadDelay $ 5 * 10^(6 :: Int)
 
 -- | Handles connection to upstream pool server
-runUpstream :: GlobalState -> String -> Word16 -> IO ThreadId
-runUpstream global url port = forkIO $ forever $ do
+runUpstream :: GlobalState -> String -> Word16 -> IO (Async ())
+runUpstream global url port = async $ forever $ do
     upstream <- getAddrInfo
                     (Just $ defaultHints { addrFamily = AF_INET, addrSocketType = Stream })
                     (Just url)
@@ -140,9 +142,10 @@ main = withSocketsDo $ do
     -- create the global global
     global <- initaliseGlobal config
 
-    _ <- listenDownstream global $ _localPort config
-    _ <- runShareLogger global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
-    _ <- runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
+    -- link together child threads
+    _ <- link <$> listenDownstream global (_localPort config)
+    _ <- link <$> runShareLogger global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
+    _ <- link <$> runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
 
     -- hack to get control-c working
     _ <- runMaybeT $ forever $ do

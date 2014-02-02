@@ -4,25 +4,18 @@ module POW (tests) where
 import ProxyPool.Mining
 import ProxyPool.Stratum
 
-import Control.Monad.IO.Class
-
 import Data.Aeson
-import qualified Data.Vector as V
+
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Builder as B
 import qualified Data.ByteString.Lazy as BL
 
 import qualified Data.ByteString.Base16 as B16
 
-import Control.Applicative
-import Data.Monoid
-
 import Data.Maybe
 
 import Test.Tasty
 import Test.Tasty.Hspec
-
-import Debug.Trace
 
 tests :: TestTree
 tests = testGroup "POW" [ testCase "packInt" packIntSpec
