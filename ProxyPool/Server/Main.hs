@@ -26,7 +26,6 @@ import Data.Aeson
 import Data.Text as T
 import Data.Text.Encoding as T
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
 
 import Network
@@ -56,28 +55,22 @@ listenDownstream global port = do
         async $ do
             infoM "client" $ "Accepted connection from " ++ host ++ ":" ++ show remotePort
             bracket
-                (initaliseClient handle global)
+                (initaliseClient handle host global)
                 finaliseClient
                 (handleClient global)
             `catch` \(e :: IOException) -> warningM "client" $ "IOException in client: " ++ show e
 
--- | Manages publication of shares to Redis
-runShareLogger :: GlobalState -> String -> Maybe B.ByteString -> IO (Async ())
-runShareLogger global host auth = async $ forever $ do
-    infoM "sharelogger" $ "Connecting to " ++  host
+-- | Manages Redis db connection
+runDB :: GlobalState -> String -> Maybe B.ByteString -> IO (Async ())
+runDB global host auth = async $ forever $ do
+    infoM "db" $ "Connecting to " ++  host
     conn <- R.connect $ R.defaultConnectInfo { R.connectHost = host, R.connectAuth = auth }
 
-    -- test connection
-    reply <- R.runRedis conn R.ping
-    case reply of
-        Left (R.Error xs) -> errorM "sharelogger" $ "Error testing Redis connection " ++ B8.unpack xs
-        _                 -> do
-            infoM "sharelogger" "Redis connected"
-            handleShareLogging global conn `catches` [ Handler $ \(e :: IOException) -> warningM "sharelogger" $ "IOException in sharelogger: " ++ show e
-                                                     , Handler $ \(_ :: R.ConnectionLostException) -> warningM "sharelogger" "Redis connection lost"
-                                                     ]
+    handleDB global conn `catches` [ Handler $ \(e :: IOException) -> warningM "db" $ "IOException in DB: " ++ show e
+                                   , Handler $ \(_ :: R.ConnectionLostException) -> warningM "db" "Redis connection lost"
+                                   ]
 
-    warningM "sharelogger" "Sleeping for 5 seconds before reconnection"
+    warningM "db" "Sleeping for 5 seconds before reconnection"
     threadDelay $ 5 * 10^(6 :: Int)
 
 -- | Handles connection to upstream pool server
@@ -143,9 +136,9 @@ main = withSocketsDo $ do
     global <- initaliseGlobal config
 
     -- link together child threads
-    _ <- link <$> listenDownstream global (_localPort config)
-    _ <- link <$> runShareLogger global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
-    _ <- link <$> runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
+    (link =<<) $ listenDownstream global (_localPort config)
+    (link =<<) $ runDB global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
+    (link =<<) $ runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
 
     -- hack to get control-c working
     _ <- runMaybeT $ forever $ do

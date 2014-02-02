@@ -27,7 +27,7 @@ import Network.Socket hiding (accept)
 main :: IO ()
 main = do
     -- run 1000 connections
-    replicateM_ 1000 runClient
+    replicateM_ 1 runClient
     -- for 5 minutes
     threadDelay $ 60 * 5 * 10^(6 :: Integer)
 
@@ -53,7 +53,7 @@ runClient = forkIO $ do
 
                    -- send subscription and auth
                    hPutStrLn handle "{\"id\": 2, \"method\": \"mining.subscribe\", \"params\": []}"
-                   hPutStrLn handle $ "{\"id\": 3, \"method\": \"mining.authorize\", \"params\": [\"" ++ name ++ "\", \"asdf\"]}"
+                   hPutStrLn handle "{\"id\": 3, \"method\": \"mining.authorize\", \"params\": [\"DReCBSKnatV3DuWez4YJWkQfpUxGknzmkN\", \"asdf\"]}"
 
                    en2Size <- newIORef 0
 

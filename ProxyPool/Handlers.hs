@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns, DeriveDataTypeable #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns, DeriveDataTypeable, MultiWayIf #-}
 module ProxyPool.Handlers (
     initaliseGlobal
   , initaliseClient
@@ -9,7 +9,7 @@ module ProxyPool.Handlers (
   , handleServer
   , finaliseServer
 
-  , handleShareLogging
+  , handleDB
 
   , GlobalState
   , ServerSettings(..)
@@ -22,6 +22,7 @@ import ProxyPool.Mining
 
 import System.IO (Handle, hClose)
 import System.Log.Logger
+import System.Timeout
 
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow ((&&&))
@@ -35,6 +36,8 @@ import Control.Exception hiding (handle)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
+
+import Control.Concurrent.MVar
 
 import Data.IORef
 import Data.Aeson
@@ -76,7 +79,9 @@ data ClientState
                   -- | Number of dead shares submitted by the client since last vardiff retarget
                   , c_lastSharesDead   :: IORef Int
                   -- | Uniquely identifies this client
-                  , c_id           :: !Integer
+                  , c_id               :: !Integer
+                  -- | Hostname of the client
+                  , c_host             :: String
                   }
 
 data ServerSettings
@@ -111,6 +116,8 @@ data ServerSettings
                      , _vardiffAllowance    :: Double
                      -- | Minimum allowable difficulty
                      , _vardiffMin          :: Double
+                     -- | How many minutes does ban take to expire
+                     , _banExpiry           :: Int
                      } deriving (Show)
 
 instance FromJSON ServerSettings where
@@ -130,7 +137,9 @@ instance FromJSON ServerSettings where
                            v .: "vardiffRetargetTime" <*>
                            v .: "vardiffTarget"       <*>
                            v .: "vardiffAllowance"    <*>
-                           v .: "vardiffMin"
+                           v .: "vardiffMin"          <*>
+                           v .: "banExpiry"
+
     parseJSON _          = mzero
 
 data GlobalState
@@ -145,6 +154,10 @@ data GlobalState
                   , _upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
                   , _shareChan      :: Chan Share
+                  -- | Channel used to ban hosts
+                  , _banChan        :: Chan String
+                  -- | Channel used to request checks on the host
+                  , _checkChan      :: Chan (String, Bool -> IO ())
                   , _settings       :: ServerSettings
                   }
 
@@ -189,6 +202,8 @@ initaliseGlobal settings = GlobalState        <$>
                            newChan            <*>
                            newChan            <*>
                            newChan            <*>
+                           newChan            <*>
+                           newChan            <*>
                            return settings
 
 initaliseHandler :: Handle -> IO HandlerState
@@ -200,15 +215,16 @@ finaliseHandler state = do
     readIORef (_children state) >>= mapM_ cancel
 
 -- | Initalises client state
-initaliseClient :: Handle -> GlobalState -> IO ClientState
-initaliseClient handle global = ClientState                   <$>
-                                initaliseHandler handle       <*>
-                                newChan                       <*>
-                                newIORef (Job "" (0,0) (0,0)) <*>
-                                newIORef 0.000488             <*>
-                                newIORef 0                    <*>
-                                newIORef 0                    <*>
-                                incr (_clientCounter global)
+initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
+initaliseClient handle host global = ClientState                   <$>
+                                     initaliseHandler handle       <*>
+                                     newChan                       <*>
+                                     newIORef (Job "" (0,0) (0,0)) <*>
+                                     newIORef 0.000488             <*>
+                                     newIORef 0                    <*>
+                                     newIORef 0                    <*>
+                                     incr (_clientCounter global)  <*>
+                                     return host
 
 -- | Record child threads as well as ensuring child thread death triggers an exception on the parent
 linkChild :: HandlerState -> Async () -> IO ()
@@ -263,9 +279,14 @@ handleClient global local = do
         line <- readChan (c_writerChan local)
         B8.hPutStrLn handle line
 
-    -- TODO: Time out client if non initalisation
+    -- check if the IP is banned
+    banned <- liftIO $ do
+        waiter <- newEmptyMVar
+        writeChan (_checkChan global) (c_host local, putMVar waiter)
+        takeMVar waiter
+
     -- wait for mining.subscription call
-    process handle $ \case
+    initalised <- timeout 30 $ process handle $ \case
         Just (Request rid Subscribe) -> do
             -- reply with initalisation, set extraNonce1 as empty
             -- it'll be reinserted by the work notification
@@ -273,8 +294,10 @@ handleClient global local = do
             finish ()
         _ -> continue
 
+    maybe (throwIO $ KillClientException "Took too long to initalise") (const $ return ()) initalised
+
     -- proxy server notifications
-    (linkChild (c_handler local) =<<) . async $ do
+    (linkChild (c_handler local) =<<) . async $ unless banned $ do
         -- duplicate server notification channel
         localNotifyChan <- dupChan (_notifyChan global)
 
@@ -315,14 +338,14 @@ handleClient global local = do
     -- wait for mining.authorization call
     user <- process handle $ \case
         Just (Request rid (Authorize user _)) -> do
+            -- check if the address they are using is a valid address
             let valid = validateAddress (_publickeyByte . _settings $ global) $ T.encodeUtf8 user
-            if valid
-                then do
-                    liftIO $ writeResponse rid $ General $ Right $ Bool True
-                    finish user
-                else do
-                    liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-2), String "Username is not a valid address"]
-                    continue
+
+            if | banned -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-1), String $ "Your IP address is banned for too many invalid share submissions, the ban expires in " <> (T.pack . show . _banExpiry . _settings $ global) <> " minutes" ]
+               | valid  -> do
+                     liftIO $ writeResponse rid $ General $ Right $ Bool True
+                     finish user
+               | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-2), String "Username is not a valid address" ]
 
         _ -> continue
 
@@ -359,8 +382,9 @@ handleClient global local = do
         lastSharesDead <- readIORef (c_lastSharesDead local)
 
         -- ban the client if 90% of submitted shares are dead
-        when (lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastSharesDead :: Double) >= 0.9) $ do
-            -- TODO: log the ban
+        when (lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9) $ do
+            writeChan (_banChan global) $ c_host local
+            infoM "client" $ "Banned " ++ c_host local ++ " for too many dead shares"
             throwIO $ KillClientException "Too many dead shares submitted"
 
         -- clear the share counters
@@ -377,21 +401,20 @@ handleClient global local = do
             let submitDiff = targetToDifficulty $ getPOW sub work (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
 
             -- verify job and share difficulty
-            valid <- if s_job sub == j_jobID job && submitDiff >= diff
+            let valid = s_job sub == j_jobID job && submitDiff >= diff
+            if valid
                 then do
                     -- check if it meets upstream difficulty
                     upstreamDiff <- readIORef $ _upstreamDiff global
 
                     -- submit share to upstream
-                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
+                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (_username . _settings $ global), s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
 
                     -- write response
                     writeResponse rid $ General $ Right $ Bool True
-                    return True
                 else do
-                -- stale or invalid
-                    writeResponse rid $ General $ Left $ Bool False
-                    return False
+                    -- stale or invalid
+                    writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
             writeChan (_shareChan global) $ Share user submitDiff (_serverName . _settings $ global) valid
@@ -468,12 +491,29 @@ handleServer global local = do
 finaliseServer :: ServerState -> IO ()
 finaliseServer = finaliseHandler . s_handler
 
--- | Sends the share to Redis
-handleShareLogging :: GlobalState -> R.Connection -> IO ()
-handleShareLogging global conn = do
+-- | Handle database queries
+handleDB :: GlobalState -> R.Connection -> IO ()
+handleDB global conn = do
+    -- test connection first
+    _ <- R.runRedis conn R.ping
+
     let channel = T.encodeUtf8 $ _redisChanName . _settings $ global
-    forever $ readChan (_shareChan global) >>= \share -> do
+
+    -- handle share logging
+    (link =<<) $ async $ forever $ readChan (_shareChan global) >>= \share -> do
         result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
         case result of
-            Left (R.Error xs) -> errorM "sharelogger" $ "Error while publishing share (" ++ show share ++ "): " ++ B8.unpack xs
-            _                 -> return ()
+            Right _ -> return ()
+            Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ "): " ++ B8.unpack xs
+
+    -- checking IPs
+    (link =<<) $ async $ forever $ readChan (_checkChan global) >>= \(host, callback) -> do
+        result <- R.runRedis conn $ R.exists $ B8.pack host
+        case result of
+            Right val -> callback val
+            _         -> callback False
+
+    -- banning IPs
+    forever $ readChan (_banChan global) >>= \host -> do
+        _ <- R.runRedis conn $ R.setex (B8.pack host) (60 * (fromIntegral . _banExpiry . _settings $ global)) ""
+        return ()
