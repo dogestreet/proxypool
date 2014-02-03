@@ -50,15 +50,15 @@ listenDownstream global port = do
     infoM "client" $ "Listening on localhost:" ++ show port
     -- listen for connections on separate thread
     async . forever $ do
-        (handle, host, remotePort) <- accept sock
+        (handle, host, _) <- accept sock
         -- handle each incoming connection on a separate thread
-        async $ do
-            infoM "client" $ "Accepted connection from " ++ host ++ ":" ++ show remotePort
-            bracket
-                (initaliseClient handle host global)
-                finaliseClient
-                (handleClient global)
-            `catch` \(e :: IOException) -> warningM "client" $ "IOException in client: " ++ show e
+        async $ bracket
+                    (initaliseClient handle host global)
+                    finaliseClient
+                    (handleClient global)
+                `catches` [ Handler $ \(e :: IOException) -> warningM "client" $ "IOException in client: " ++ show e
+                          , Handler $ \(e :: ProxyPoolException) -> infoM "client" $ "Killed: " ++ show e
+                          ]
 
 -- | Manages Redis db connection
 runDB :: GlobalState -> String -> Maybe B.ByteString -> IO (Async ())
@@ -98,7 +98,9 @@ runUpstream global url port = async $ forever $ do
                    )
                    finaliseServer
                    (handleServer global)
-               `catch` \(e :: IOException) -> warningM "server" $ "IOException in server: " ++ show e
+               `catches` [ Handler $ \(e :: IOException) -> warningM "server" $ "IOException in server: " ++ show e
+                         , Handler $ \(e :: ProxyPoolException) -> warningM "server" $ "Exception thrown: " ++ show e
+                         ]
 
     warningM "server" "Sleeping for 5 seconds before reconnection"
     threadDelay $ 5 * 10^(6 :: Int)

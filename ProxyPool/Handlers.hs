@@ -14,7 +14,7 @@ module ProxyPool.Handlers (
   , GlobalState
   , ServerSettings(..)
 
-  , KillClientException
+  , ProxyPoolException
 ) where
 
 import ProxyPool.Stratum
@@ -45,7 +45,7 @@ import Data.IORef
 import Data.Aeson
 import Data.Word
 import Data.Typeable
-import Data.Monoid ((<>))
+import Data.Monoid ((<>), mconcat, mempty)
 
 import Data.Time.Clock.POSIX
 
@@ -53,19 +53,18 @@ import qualified Data.Vector as V
 
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
-import qualified Data.Text.Lazy.Builder as TL
-import qualified Data.Text.Lazy.Encoding as TL
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Builder as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Base16.Lazy as BL16
 
 import qualified Database.Redis as R
 
 data HandlerState
-    = HandlerState { _handle   :: Handle
-                   , _children :: IORef [Async ()]
+    = HandlerState { h_handle   :: Handle
+                   , h_children :: IORef [Async ()]
                    }
 
 data ServerState
@@ -75,8 +74,8 @@ data ServerState
 
 data ClientState
     = ClientState { c_handler          :: HandlerState
-                  , c_writerChan       :: Chan B.ByteString
-                  , c_job              :: TVar Job
+                  , c_writerChan       :: Chan B.Builder
+                  , c_nonce            :: IORef Integer
                   -- | Local difficulty managed by vardiff
                   , c_difficulty       :: TVar Double
                   -- | Number of shares submitted by the client since last vardiff retarget
@@ -92,41 +91,41 @@ data ClientState
                   }
 
 data ServerSettings
-    = ServerSettings { _serverName          :: T.Text
+    = ServerSettings { s_serverName          :: T.Text
                      -- | Host name of the upstream pool
-                     , _upstreamHost        :: T.Text
+                     , _upstreamHost         :: T.Text
                      -- | Port of the upstream pool
-                     , _upstreamPort        :: Word16
+                     , _upstreamPort         :: Word16
                      -- | Port to listen to for workers
-                     , _localPort           :: Word16
+                     , _localPort            :: Word16
                      -- | Username to login to upstream pool
-                     , _username            :: T.Text
+                     , s_username            :: T.Text
                      -- | Password to login to upstream pool
-                     , _password            :: T.Text
+                     , s_password            :: T.Text
                      -- | Using redis to pubsub shares
-                     , _redisHost           :: T.Text
+                     , _redisHost            :: T.Text
                      -- | Authentication for redis
-                     , _redisAuth           :: Maybe T.Text
+                     , _redisAuth            :: Maybe T.Text
                      -- | The redis channel to publish to
-                     , _redisChanName       :: T.Text
+                     , s_redisChanName       :: T.Text
                      -- | The byte prepended to the public key, used to verify miner addresses, 0 for Bitcoin, 30 for Dogecoin
-                     , _publickeyByte       :: Word8
+                     , s_publickeyByte       :: Word8
                      -- | Size of the new en2
-                     , _extraNonce2Size     :: Int
+                     , s_extraNonce2Size     :: Int
                      -- | Size of the new en3
-                     , _extraNonce3Size     :: Int
+                     , s_extraNonce3Size     :: Int
                      -- | Time (s) between vardiff updates
-                     , _vardiffRetargetTime :: Int
+                     , s_vardiffRetargetTime :: Int
                      -- | Target shares retarget time
-                     , _vardiffTarget       :: Int
+                     , s_vardiffTarget       :: Int
                      -- | Allow variances to be within this range
-                     , _vardiffAllowance    :: Double
+                     , s_vardiffAllowance    :: Double
                      -- | Minimum allowable difficulty
-                     , _vardiffMin          :: Double
+                     , s_vardiffMin          :: Double
                      -- | Number of shares before vardiff is forced to activate, varidiff runs if the number of shares submitted is > this or _vardiffRetargetTime seconds have elapsed
-                     , _vardiffShares       :: Int
+                     , s_vardiffShares       :: Int
                      -- | How many minutes does ban take to expire
-                     , _banExpiry           :: Int
+                     , s_banExpiry           :: Int
                      } deriving (Show)
 
 instance FromJSON ServerSettings where
@@ -153,36 +152,32 @@ instance FromJSON ServerSettings where
     parseJSON _          = mzero
 
 data GlobalState
-    = GlobalState { _clientCounter  :: IORef Integer
-                  , _nonceCounter   :: IORef Integer
-                  , _matchCounter   :: IORef Integer
+    = GlobalState { g_clientCounter  :: IORef Integer
+                  , g_nonceCounter   :: IORef Integer
+                  , g_matchCounter   :: IORef Integer
+                  , g_extraNonce1    :: IORef B.ByteString
+                  , g_upstreamDiff   :: IORef Double
+                  , g_work           :: IORef (Work, B.Builder, B.Builder)
                   -- | Channel for work notifications
-                  , _notifyChan     :: Chan (StratumResponse, Work, Double)
+                  , g_notifyChan     :: Chan JobNotify
                   -- | Channel for upstream requests
-                  , _upstreamChan   :: Chan Request
+                  , g_upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
-                  , _shareChan      :: Chan Share
+                  , g_shareChan      :: Chan Share
                   -- | Channel used to ban hosts
-                  , _banChan        :: Chan String
+                  , g_banChan        :: Chan String
                   -- | Channel used to request checks on the host
-                  , _checkChan      :: Chan (String, Bool -> IO ())
-                  , _settings       :: ServerSettings
+                  , g_checkChan      :: Chan (String, Bool -> IO ())
+                  , g_settings       :: ServerSettings
                   }
 
-data Job
-    = Job { j_jobID        :: {-# UNPACK #-} !T.Text
-          , j_nonce1       :: {-# UNPACK #-} !(Integer, Int)
-          , j_nonce2       :: {-# UNPACK #-} !(Integer, Int)
-          , j_work         :: {-# UNPACK #-} !Work
-          , j_upstreamDiff :: {-# UNPACK #-} !Double
-          }
-    deriving (Show)
+data JobNotify = JobNotify | DiffNotify
 
 data Share
-    = Share { sh_submitter  :: {-# UNPACK #-} !T.Text
-            , sh_difficulty :: {-# UNPACK #-} !Double
-            , sh_server     :: {-# UNPACK #-} !T.Text
-            , sh_valid      ::                !Bool
+    = Share { _sh_submitter  :: {-# UNPACK #-} !T.Text
+            , _sh_difficulty :: {-# UNPACK #-} !Double
+            , _sh_server     :: {-# UNPACK #-} !T.Text
+            , _sh_valid      ::                !Bool
             }
     deriving (Show, Typeable)
 
@@ -193,25 +188,29 @@ instance ToJSON Share where
                                                , "valid" .= valid
                                                ]
 
--- | Used to deliberately terminate the client thread
-data KillClientException = KillClientException { _reason :: String } deriving (Show, Typeable)
+data ProxyPoolException = KillClientException { _reason :: String }
+                        | KillServerException { _reason :: String }
+                        deriving (Show, Typeable)
 
-instance Exception KillClientException
+instance Exception ProxyPoolException
 
 -- | Increments an IORef counter
 incr :: IORef Integer -> IO Integer
 incr counter = atomicModifyIORef' counter $ join (&&&) (1+)
 
 initaliseGlobal :: ServerSettings -> IO GlobalState
-initaliseGlobal settings = GlobalState        <$>
-                           newIORef 0         <*>
-                           newIORef 0         <*>
-                           newIORef 0         <*>
-                           newChan            <*>
-                           newChan            <*>
-                           newChan            <*>
-                           newChan            <*>
-                           newChan            <*>
+initaliseGlobal settings = GlobalState                          <$>
+                           newIORef 0                           <*>
+                           newIORef 0                           <*>
+                           newIORef 0                           <*>
+                           newIORef ""                          <*>
+                           newIORef 0                           <*>
+                           newIORef (emptyWork, mempty, mempty) <*>
+                           newChan                              <*>
+                           newChan                              <*>
+                           newChan                              <*>
+                           newChan                              <*>
+                           newChan                              <*>
                            return settings
 
 initaliseHandler :: Handle -> IO HandlerState
@@ -219,25 +218,25 @@ initaliseHandler handle = HandlerState <$> return handle <*> newIORef []
 
 finaliseHandler :: HandlerState -> IO ()
 finaliseHandler state = do
-    hClose $ _handle state
-    readIORef (_children state) >>= mapM_ cancel
+    hClose $ h_handle state
+    readIORef (h_children state) >>= mapM_ cancel
 
 -- | Initalises client state
 initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
-initaliseClient handle host global = ClientState                                <$>
-                                     initaliseHandler handle                    <*>
-                                     newChan                                    <*>
-                                     newTVarIO (Job "" (0,0) (0,0) emptyWork 0) <*>
-                                     newTVarIO 0.000488                         <*>
-                                     newTVarIO 0                                <*>
-                                     newTVarIO 0                                <*>
-                                     newTVarIO 0                                <*>
-                                     incr (_clientCounter global)               <*>
+initaliseClient handle host global = ClientState                   <$>
+                                     initaliseHandler handle       <*>
+                                     newChan                       <*>
+                                     newIORef  0                   <*>
+                                     newTVarIO 0.000488            <*>
+                                     newTVarIO 0                   <*>
+                                     newTVarIO 0                   <*>
+                                     newTVarIO 0                   <*>
+                                     incr (g_clientCounter global) <*>
                                      return host
 
 -- | Record child threads as well as ensuring child thread death triggers an exception on the parent
 linkChild :: HandlerState -> Async () -> IO ()
-linkChild handler asy = modifyIORef' (_children $ handler) (asy:) >> link asy
+linkChild handler asy = modifyIORef' (h_children $ handler) (asy:) >> link asy
 
 process :: (Monad m, MonadIO m, FromJSON a) => Handle -> (Maybe a -> EitherT b m ()) -> m b
 process handle f = do
@@ -258,48 +257,47 @@ handleClient global local = do
     let
         -- | Write server response
         writeResponse :: Value -> StratumResponse -> IO ()
-        writeResponse rid resp = writeResponseRaw $ BL.toStrict . encode $ Response rid resp
+        writeResponse rid resp = writeResponseRaw $ B.lazyByteString $ encode $ Response rid resp
 
-        writeResponseRaw :: B.ByteString -> IO ()
+        writeResponseRaw :: B.Builder -> IO ()
         writeResponseRaw = writeChan (c_writerChan local)
 
         en2Size :: Int
-        en2Size = _extraNonce2Size . _settings $ global
+        en2Size = s_extraNonce2Size . g_settings $ global
 
-        nextNonce :: IO Integer
-        nextNonce = atomicModifyIORef' (_nonceCounter global) $ join (&&&) $ \x -> (x + 1) `mod` (2 ^ (8 * en2Size))
-
-        packEn2 :: Integer -> T.Text
-        packEn2 nonce = toHex $ BL.toStrict $ B.toLazyByteString $ packIntLE nonce en2Size
+        packEn2 :: Integer -> BL.ByteString
+        packEn2 = BL16.encode . B.toLazyByteString . flip packIntLE en2Size
 
         handle :: Handle
-        handle = _handle . c_handler $ local
+        handle = h_handle . c_handler $ local
 
         -- | Send request to upstream, taking the request and a callback
         upstreamRequest :: StratumRequest -> IO ()
         upstreamRequest request = do
             -- generate a new request ID
-            rid <- incr $ _matchCounter global
+            rid <- incr $ g_matchCounter global
             -- send request to the upstream listener
-            writeChan (_upstreamChan global) $ Request (Number . fromInteger $ rid) request
+            writeChan (g_upstreamChan global) $ Request (Number . fromInteger $ rid) request
+
+    infoM "client" $ "Client (" ++ show (c_id local) ++ ") from " ++ show (c_host local) ++ " connected"
 
     -- thread to sequence writes
     (linkChild (c_handler local) =<<) . async . forever $ do
         line <- readChan (c_writerChan local)
-        B8.hPutStrLn handle line
+        B.hPutBuilder handle $ line <> B.char8 '\n'
 
     -- check if the IP is banned
     banned <- liftIO $ do
         waiter <- newEmptyMVar
-        writeChan (_checkChan global) (c_host local, putMVar waiter)
+        writeChan (g_checkChan global) (c_host local, putMVar waiter)
         takeMVar waiter
 
     -- wait for mining.subscription call
-    initalised <- timeout 30 $ process handle $ \case
+    initalised <- timeout (30 * 10^(6 :: Int)) $ process handle $ \case
         Just (Request rid Subscribe) -> do
             -- reply with initalisation, set extraNonce1 as empty
             -- it'll be reinserted by the work notification
-            liftIO $ writeResponse rid $ Initalise "" $ _extraNonce3Size . _settings $ global
+            liftIO $ writeResponse rid $ Initalise "" $ s_extraNonce3Size . g_settings $ global
             finish ()
         _ -> continue
 
@@ -308,47 +306,43 @@ handleClient global local = do
     -- proxy server notifications
     (linkChild (c_handler local) =<<) . async $ unless banned $ do
         -- duplicate server notification channel
-        localNotifyChan <- dupChan (_notifyChan global)
+        localNotifyChan <- dupChan (g_notifyChan global)
+
+        let writeJobNotify = do
+                (_, part1, part2) <- readIORef $ g_work global
+
+                -- get generate unique client nonce
+                nonce <- atomicModifyIORef' (g_nonceCounter global) $ join (&&&) $ \x -> (x + 1) `mod` (2 ^ (8 * en2Size))
+                writeIORef (c_nonce local) nonce
+
+                writeResponseRaw $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
+            writeDiffNotify = do
+                upstreamDiff <- readIORef $ g_upstreamDiff global
+                -- cap local difficulty at upstream diff
+                newDiff <- atomically $ do
+                    diff <- readTVar $ c_difficulty local
+                    let newDiff = min diff upstreamDiff
+                    writeTVar (c_difficulty local) newDiff
+                    return newDiff
+                writeResponse Null $ SetDifficulty $ newDiff * 65536
+
+        -- immediately send a job to the client if possible
+        upstreamDiff <- readIORef $ g_upstreamDiff global
+        when (upstreamDiff /= 0) $ do
+            writeDiffNotify
+            writeJobNotify
 
         forever $ readChan localNotifyChan >>= \case
-            -- coinbase1 is usually massive, so appending at the back will cost us a lot, we'll have to hand serialise this
-            (WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean extraNonce1 _, work, upstreamDiff) -> do
-                -- get generate unique client nonce
-                nonce <- nextNonce
-
-                -- change the current job and get the difficulty
-                diff <- atomically $ do
-                    writeTVar (c_job local) $ Job job (unpackIntLE . fromHex $ extraNonce1, T.length extraNonce1 `quot` 2) (nonce, en2Size) work upstreamDiff
-                    readTVar $ c_difficulty local
-
-                writeResponse Null $ SetDifficulty $ diff * 65536
-
-                -- set the work
-                writeResponseRaw $ BL.toStrict $ TL.encodeUtf8 $ TL.toLazyText $ foldr1 (<>) $ map TL.fromText
-                    [ "{\"id\":null,\"error\":null,\"method\":\"mining.notify\",\"params\":["
-                    , "\"", job, "\","
-                    , "\"", prev, "\",\""
-                    , cb1
-                    , extraNonce1
-                    , packEn2 nonce
-                    , "\",\"", cb2, "\","
-                    , T.decodeUtf8 (BL.toStrict $ encode merkle), ","
-                    , "\"", bv, "\","
-                    , "\"", nbit, "\","
-                    , "\"", ntime, "\","
-                    , if clean then "true" else "false"
-                    , "]}"
-                    ]
-
-            _ -> return ()
+            JobNotify  -> writeJobNotify
+            DiffNotify -> writeDiffNotify
 
     -- wait for mining.authorization call
     user <- process handle $ \case
         Just (Request rid (Authorize user _)) -> do
             -- check if the address they are using is a valid address
-            let valid = validateAddress (_publickeyByte . _settings $ global) $ T.encodeUtf8 user
+            let valid = validateAddress (s_publickeyByte . g_settings $ global) $ T.encodeUtf8 user
 
-            if | banned -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-1), String $ "Your IP address is banned for too many invalid share submissions, the ban expires in " <> (T.pack . show . _banExpiry . _settings $ global) <> " minutes" ]
+            if | banned -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-1), String $ "Your IP address is banned for too many invalid share submissions, the ban expires in " <> (T.pack . show . s_banExpiry . g_settings $ global) <> " minutes" ]
                | valid  -> do
                      liftIO $ writeResponse rid $ General $ Right $ Bool True
                      finish user
@@ -356,14 +350,14 @@ handleClient global local = do
 
         _ -> continue
 
-    infoM "client" $ T.unpack $ "Client " <> user <> " connected"
+    infoM "client" $ "Client (" ++ show (c_id local) ++ ") authorized - " ++ T.unpack user
 
     vardiffTrigger <- newEmptyMVar
     getPOSIXTime >>= atomically . writeTVar (c_lastVardiff local)
 
     -- vardiff trigger thread
     (linkChild (c_handler local) =<<) . async . forever $ do
-        threadDelay $ (_vardiffRetargetTime . _settings $ global) * 10^(6 :: Integer)
+        threadDelay $ (s_vardiffRetargetTime . g_settings $ global) * 10^(6 :: Integer)
         putMVar vardiffTrigger ()
 
     -- vardiff/ban thread
@@ -379,20 +373,22 @@ handleClient global local = do
                 debugM "vardiff" $ "Vardiff client diff adjust: " ++ show (diff * 65536)
                 writeResponse Null $ SetDifficulty $ diff * 65536
             banClient = do
-                writeChan (_banChan global) $ c_host local
+                writeChan (g_banChan global) $ c_host local
                 infoM "client" $ "Banned " ++ c_host local ++ " for too many dead shares"
                 throw $ KillClientException "Too many dead shares submitted"
             doNothing = return ()
+
+        upstreamDiff   <- readIORef $ g_upstreamDiff global
 
         -- run computations inside the transaction
         join $ atomically $ do
             lastTime    <- readTVar $ c_lastVardiff local
 
             let elapsedTime      = round $ currentTime - lastTime :: Integer
-                retargetTime     = _vardiffRetargetTime . _settings $ global
-                target           = _vardiffTarget       . _settings $ global
-                targetAllowance  = _vardiffAllowance    . _settings $ global
-                minDifficulty    = _vardiffMin          . _settings $ global
+                retargetTime     = s_vardiffRetargetTime . g_settings $ global
+                target           = s_vardiffTarget       . g_settings $ global
+                targetAllowance  = s_vardiffAllowance    . g_settings $ global
+                minDifficulty    = s_vardiffMin          . g_settings $ global
 
             lastShares     <- readTVar $ c_lastShares local
             lastSharesDead <- readTVar $ c_lastSharesDead local
@@ -415,7 +411,6 @@ handleClient global local = do
 
                     -- otherwise, check if hashrate is in vardiff allowance
                        | currentHash * (1 - targetAllowance) < estimatedHash && estimatedHash < currentHash * (1 + targetAllowance) -> do
-                              upstreamDiff <- j_upstreamDiff <$> (readTVar .  c_job $ local)
                               -- cap difficulty to min and upstream
                               let newDiff = min (max minDifficulty $ ah2d (fromIntegral target * (60 / fromIntegral elapsedTime)) estimatedHash) upstreamDiff
 
@@ -429,19 +424,22 @@ handleClient global local = do
 
     -- process workers submissions (forever)
     process handle $ \case
-        Just (Request rid sub@(Submit{})) -> liftIO $  do
+        Just (Request rid sub@(Submit{})) -> liftIO $ do
             -- doesn't really matter if this race conditions
-            job  <- readTVarIO $ c_job local
-            diff <- readTVarIO $ c_difficulty local
+            diff          <- readTVarIO $ c_difficulty local
+            nonce         <- readIORef $ c_nonce local
+            (work, _, _)  <- readIORef $ g_work global
+            en1           <- readIORef $ g_extraNonce1 global
+            upstreamDiff  <- readIORef $ g_upstreamDiff global
 
-            let submitDiff = targetToDifficulty $ getPOW sub (j_work job) (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
+            let submitDiff = targetToDifficulty $ getPOW sub work en1 (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt
 
             -- verify job and share difficulty
-            let valid = s_job sub == j_jobID job && submitDiff >= diff
+            let valid = s_job sub == w_job work && submitDiff >= diff
             if valid
                 then liftIO $ do
                     -- submit share to upstream
-                    when (submitDiff >= j_upstreamDiff job) $ upstreamRequest $ sub { s_worker = (_username . _settings $ global), s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
+                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (s_username . g_settings $ global), s_extraNonce2 = (T.decodeUtf8 . BL.toStrict . packEn2 $ nonce) <> s_extraNonce2 sub }
 
                     -- write response
                     writeResponse rid $ General $ Right $ Bool True
@@ -450,7 +448,7 @@ handleClient global local = do
                     writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            writeChan (_shareChan global) $ Share user submitDiff (_serverName . _settings $ global) valid
+            writeChan (g_shareChan global) $ Share user submitDiff (s_serverName . g_settings $ global) valid
 
             -- record shares for vardiff
             atomically $ do
@@ -459,14 +457,12 @@ handleClient global local = do
 
             -- trigger vardiff if we are over target
             lastShares <- readTVarIO (c_lastShares local)
-            when (lastShares >= (_vardiffShares . _settings $ global)) $ do
-                debugM "vardiff" "Vardiff activated by overtarget"
-                putMVar vardiffTrigger ()
+            when (lastShares >= (s_vardiffShares . g_settings $ global)) $ putMVar vardiffTrigger ()
 
         _ -> continue
 
 finaliseClient :: ClientState -> IO ()
-finaliseClient = finaliseHandler . c_handler
+finaliseClient local = finaliseHandler . c_handler $ local
 
 initaliseServer :: Handle -> IO ServerState
 initaliseServer handle = ServerState <$> initaliseHandler handle <*> newChan
@@ -475,7 +471,7 @@ handleServer :: GlobalState -> ServerState -> IO ()
 handleServer global local = do
     let
         handle :: Handle
-        handle = _handle . s_handler $ local
+        handle = h_handle . s_handler $ local
 
         writeRequest :: Request -> IO ()
         writeRequest = writeChan (s_writerChan local) . BL.toStrict . encode
@@ -490,17 +486,21 @@ handleServer global local = do
     writeRequest $ Request (Number 1) Subscribe
 
     -- wait for subscription response
-    (extraNonce1, originalEn2Size) <- process handle $ \case
-        Just (Response (Number 1) (Initalise en1 oen2s)) -> finish (en1, oen2s)
-        _ -> continue
+    extraNonce1 <- process handle $ \case
+        Just (Response (Number 1) (Initalise en1 oen2s)) -> do
+            -- verify nonce configuration
+            when (oen2s /= (s_extraNonce2Size . g_settings $ global) + (s_extraNonce3Size . g_settings $ global)) $ liftIO $ throwIO $ KillServerException $ "Invalid nonce sizes specified, must add up to " ++ show oen2s
 
-    infoM "server" "Received subscription response"
-    -- verify nonce configuration
-    when (originalEn2Size /= (_extraNonce2Size . _settings $ global) + (_extraNonce3Size . _settings $ global)) $ error $ "Invalid nonce sizes specified, must add up to " ++ show originalEn2Size
+            -- save the original nonce
+            let en1Bytes = T.encodeUtf8 en1
+            liftIO $ writeIORef (g_extraNonce1 global) en1Bytes
+            finish en1Bytes
+
+        _ -> continue
 
     -- authorize
     infoM "server" "Sending authorization"
-    writeRequest $ Request (Number 2) $ Authorize (_username . _settings $ global) (_password . _settings $ global)
+    writeRequest $ Request (Number 2) $ Authorize (s_username . g_settings $ global) (s_password . g_settings $ global)
 
     -- wait for authorization response
     process handle $ \case
@@ -512,24 +512,44 @@ handleServer global local = do
 
     -- thread to listen for server notifications
     (linkChild (s_handler local) =<<) . async $ do
-        -- save the upstream difficulty
-        upstreamDiff <- newIORef 0
-
         process handle $ liftIO . \case
-            Just (Response _ wn@(WorkNotify{})) -> do
-                return ()
+            Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) ->
                 case fromWorkNotify wn of
                     Just work -> do
-                        udiff <- readIORef upstreamDiff
-                        writeChan (_notifyChan global) $ (wn { wn_extraNonce1 = extraNonce1, wn_originalEn2Size = originalEn2Size }, work, udiff)
+                        -- set the work
+                        let fromParts = mconcat . map B.byteString
+                            !part1    = fromParts [ "{\"id\":null,\"error\":null,\"method\":\"mining.notify\",\"params\":[\""
+                                                  , T.encodeUtf8 job, "\",\""
+                                                  , T.encodeUtf8 prev, "\",\""
+                                                  , T.encodeUtf8 cb1
+                                                  , extraNonce1
+                                                  ]
+                            !part2a   = fromParts [ "\",\"", T.encodeUtf8 cb2, "\"," ]
+                            !part2b   = B.lazyByteString $ encode merkle
+                            !part2c   = fromParts [ ",\""
+                                                  , T.encodeUtf8 bv, "\",\""
+                                                  , T.encodeUtf8 nbit, "\",\""
+                                                  , T.encodeUtf8 ntime, "\","
+                                                  , if clean then "true" else "false", "]}"
+                                                  ]
+                            !part2    = part2a <> part2b <> part2c
+
+                        writeIORef (g_work global) (work, part1, part2)
+
+                        -- notify listeners
+                        writeChan (g_notifyChan global) JobNotify
                     Nothing   -> errorM "server" "Invalid upstream work received"
-            Just (Response _ (SetDifficulty diff))         -> writeIORef upstreamDiff $ (diff / 65536)
+            Just (Response _ (SetDifficulty diff)) -> do
+                -- save the upstream diff
+                let newDiff = diff / 65536
+                writeIORef (g_upstreamDiff global) newDiff
+                writeChan (g_notifyChan global) DiffNotify
             Just (Response (Number _) (General (Right _))) -> debugM "share" $ "Upstream share accepted"
             Just (Response (Number _) (General (Left  _))) -> debugM "share" $ "Upstream share rejected"
             _ -> return ()
 
     -- thread to listen to client requests (forever)
-    forever $ readChan (_upstreamChan global) >>= writeRequest
+    forever $ readChan (g_upstreamChan global) >>= writeRequest
 
 finaliseServer :: ServerState -> IO ()
 finaliseServer = finaliseHandler . s_handler
@@ -540,23 +560,23 @@ handleDB global conn = do
     -- test connection first
     _ <- R.runRedis conn R.ping
 
-    let channel = T.encodeUtf8 $ _redisChanName . _settings $ global
+    let channel = T.encodeUtf8 $ s_redisChanName . g_settings $ global
 
     -- handle share logging
-    (link =<<) $ async $ forever $ readChan (_shareChan global) >>= \share -> do
+    (link =<<) $ async $ forever $ readChan (g_shareChan global) >>= \share -> do
         result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
         case result of
             Right _ -> return ()
             Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
 
     -- checking IPs
-    (link =<<) $ async $ forever $ readChan (_checkChan global) >>= \(host, callback) -> do
+    (link =<<) $ async $ forever $ readChan (g_checkChan global) >>= \(host, callback) -> do
         result <- R.runRedis conn $ R.exists $ B8.pack host
         case result of
             Right val -> callback val
             _         -> callback False
 
     -- banning IPs
-    forever $ readChan (_banChan global) >>= \host -> do
-        _ <- R.runRedis conn $ R.setex (B8.pack host) (60 * (fromIntegral . _banExpiry . _settings $ global)) ""
+    forever $ readChan (g_banChan global) >>= \host -> do
+        _ <- R.runRedis conn $ R.setex (B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
         return ()

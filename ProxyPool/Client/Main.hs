@@ -27,7 +27,7 @@ import Network.Socket hiding (accept)
 main :: IO ()
 main = do
     -- run 1000 connections
-    replicateM_ 1 runClient
+    replicateM_ 1000 runClient
     -- for 5 minutes
     threadDelay $ 60 * 5 * 10^(6 :: Integer)
 

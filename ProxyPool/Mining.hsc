@@ -66,7 +66,7 @@ fromWorkNotify wn@(WorkNotify{}) = do
         Success x -> Just x
         Error _   -> Nothing
 
-    return $ Work (wn_job wn)
+    return $ Work (T.copy $ wn_job wn)
                   (unpackBE $ fromHex $ wn_prevHash wn)
                   (fromHex $ wn_coinbase1 wn)
                   (fromHex $ wn_coinbase2 wn)
@@ -86,7 +86,7 @@ emptyWork = Work ""
                  (B.replicate 4 0)
 
 -- | Get the the share bits from submission
-getPOW :: StratumRequest -> Work -> (Integer, Int) -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
+getPOW :: StratumRequest -> Work -> B.ByteString -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
 getPOW sb@(Submit{}) work en1 en2 en3Size f = f $ packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
     where en3    = unpackIntLE . fromHex $ s_extraNonce2 sb
           ntime  = unpackIntBE . fromHex $ s_nTime sb
@@ -118,12 +118,12 @@ unpackBE :: B.ByteString -> B.ByteString
 unpackBE xs = BL.toStrict $ B.toLazyByteString $ mconcat $ take (B.length xs `quot` 4) $ map (B.byteString . B.reverse . B.take 4) $ iterate (B.drop 4) xs
 
 -- | Generates an 80 byte block header
-packBlockHeader :: Work -> (Integer, Int) -> (Integer, Int) -> (Integer, Int) -> Integer -> Integer -> B.ByteString
+packBlockHeader :: Work -> B.ByteString -> (Integer, Int) -> (Integer, Int) -> Integer -> Integer -> B.ByteString
 packBlockHeader work en1 en2 en3 ntime nonce
-    = let coinbase = BL.toStrict $ B.toLazyByteString $ B.byteString (w_coinbase1 work) <>
-                                                        uncurry packIntLE en1           <>
-                                                        uncurry packIntLE en2           <>
-                                                        uncurry packIntLE en3           <>
+    = let coinbase = BL.toStrict $ B.toLazyByteString $ B.byteString (w_coinbase1 work)         <>
+                                                        (B.byteString . fst . B16.decode $ en1) <>
+                                                        uncurry packIntLE en2                   <>
+                                                        uncurry packIntLE en3                   <>
                                                         B.byteString (w_coinbase2 work)
 
           merkleHash = merkleRoot coinbase $ w_merkle work
