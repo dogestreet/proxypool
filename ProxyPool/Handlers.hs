@@ -33,6 +33,8 @@ import Control.Monad.Trans.Either
 
 import Control.Exception hiding (handle)
 
+import Control.Concurrent.STM
+
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
@@ -43,9 +45,11 @@ import Data.IORef
 import Data.Aeson
 import Data.Word
 import Data.Typeable
-import qualified Data.Vector as V
-
 import Data.Monoid ((<>))
+
+import Data.Time.Clock.POSIX
+
+import qualified Data.Vector as V
 
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -72,12 +76,15 @@ data ServerState
 data ClientState
     = ClientState { c_handler          :: HandlerState
                   , c_writerChan       :: Chan B.ByteString
-                  , c_job              :: IORef Job
-                  , c_difficulty       :: IORef Double
+                  , c_job              :: TVar Job
+                  -- | Local difficulty managed by vardiff
+                  , c_difficulty       :: TVar Double
                   -- | Number of shares submitted by the client since last vardiff retarget
-                  , c_lastShares       :: IORef Int
+                  , c_lastShares       :: TVar Int
                   -- | Number of dead shares submitted by the client since last vardiff retarget
-                  , c_lastSharesDead   :: IORef Int
+                  , c_lastSharesDead   :: TVar Int
+                  -- | When was the last vardiff run
+                  , c_lastVardiff      :: TVar POSIXTime
                   -- | Uniquely identifies this client
                   , c_id               :: !Integer
                   -- | Hostname of the client
@@ -116,6 +123,8 @@ data ServerSettings
                      , _vardiffAllowance    :: Double
                      -- | Minimum allowable difficulty
                      , _vardiffMin          :: Double
+                     -- | Number of shares before vardiff is forced to activate, varidiff runs if the number of shares submitted is > this or _vardiffRetargetTime seconds have elapsed
+                     , _vardiffShares       :: Int
                      -- | How many minutes does ban take to expire
                      , _banExpiry           :: Int
                      } deriving (Show)
@@ -138,6 +147,7 @@ instance FromJSON ServerSettings where
                            v .: "vardiffTarget"       <*>
                            v .: "vardiffAllowance"    <*>
                            v .: "vardiffMin"          <*>
+                           v .: "vardiffShares"       <*>
                            v .: "banExpiry"
 
     parseJSON _          = mzero
@@ -146,10 +156,8 @@ data GlobalState
     = GlobalState { _clientCounter  :: IORef Integer
                   , _nonceCounter   :: IORef Integer
                   , _matchCounter   :: IORef Integer
-                  , _upstreamDiff   :: IORef Double
-                  , _currentWork    :: IORef Work
-                  -- | Channel for notifications
-                  , _notifyChan     :: Chan StratumResponse
+                  -- | Channel for work notifications
+                  , _notifyChan     :: Chan (StratumResponse, Work, Double)
                   -- | Channel for upstream requests
                   , _upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
@@ -162,9 +170,11 @@ data GlobalState
                   }
 
 data Job
-    = Job { j_jobID  :: {-# UNPACK #-} !T.Text
-          , j_nonce1 :: {-# UNPACK #-} !(Integer, Int)
-          , j_nonce2 :: {-# UNPACK #-} !(Integer, Int)
+    = Job { j_jobID        :: {-# UNPACK #-} !T.Text
+          , j_nonce1       :: {-# UNPACK #-} !(Integer, Int)
+          , j_nonce2       :: {-# UNPACK #-} !(Integer, Int)
+          , j_work         :: {-# UNPACK #-} !Work
+          , j_upstreamDiff :: {-# UNPACK #-} !Double
           }
     deriving (Show)
 
@@ -197,8 +207,6 @@ initaliseGlobal settings = GlobalState        <$>
                            newIORef 0         <*>
                            newIORef 0         <*>
                            newIORef 0         <*>
-                           newIORef 0.0       <*>
-                           newIORef emptyWork <*>
                            newChan            <*>
                            newChan            <*>
                            newChan            <*>
@@ -216,14 +224,15 @@ finaliseHandler state = do
 
 -- | Initalises client state
 initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
-initaliseClient handle host global = ClientState                   <$>
-                                     initaliseHandler handle       <*>
-                                     newChan                       <*>
-                                     newIORef (Job "" (0,0) (0,0)) <*>
-                                     newIORef 0.000488             <*>
-                                     newIORef 0                    <*>
-                                     newIORef 0                    <*>
-                                     incr (_clientCounter global)  <*>
+initaliseClient handle host global = ClientState                                <$>
+                                     initaliseHandler handle                    <*>
+                                     newChan                                    <*>
+                                     newTVarIO (Job "" (0,0) (0,0) emptyWork 0) <*>
+                                     newTVarIO 0.000488                         <*>
+                                     newTVarIO 0                                <*>
+                                     newTVarIO 0                                <*>
+                                     newTVarIO 0                                <*>
+                                     incr (_clientCounter global)               <*>
                                      return host
 
 -- | Record child threads as well as ensuring child thread death triggers an exception on the parent
@@ -303,15 +312,15 @@ handleClient global local = do
 
         forever $ readChan localNotifyChan >>= \case
             -- coinbase1 is usually massive, so appending at the back will cost us a lot, we'll have to hand serialise this
-            WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean extraNonce1 _ -> liftIO $ do
+            (WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean extraNonce1 _, work, upstreamDiff) -> do
                 -- get generate unique client nonce
                 nonce <- nextNonce
 
-                -- change the current job
-                atomicWriteIORef (c_job local) $ Job job (unpackIntLE . fromHex $ extraNonce1, T.length extraNonce1 `quot` 2) (nonce, en2Size)
+                -- change the current job and get the difficulty
+                diff <- atomically $ do
+                    writeTVar (c_job local) $ Job job (unpackIntLE . fromHex $ extraNonce1, T.length extraNonce1 `quot` 2) (nonce, en2Size) work upstreamDiff
+                    readTVar $ c_difficulty local
 
-                -- set difficulty
-                diff <- readIORef $ c_difficulty local
                 writeResponse Null $ SetDifficulty $ diff * 65536
 
                 -- set the work
@@ -331,8 +340,6 @@ handleClient global local = do
                     , "]}"
                     ]
 
-            -- cap vardiff at upstream difficulty
-            SetDifficulty diff -> liftIO $ atomicModifyIORef (c_difficulty local) $ max (diff / 65536) &&& const ()
             _ -> return ()
 
     -- wait for mining.authorization call
@@ -351,77 +358,110 @@ handleClient global local = do
 
     infoM "client" $ T.unpack $ "Client " <> user <> " connected"
 
-    -- vardiff thread
+    vardiffTrigger <- newEmptyMVar
+    getPOSIXTime >>= atomically . writeTVar (c_lastVardiff local)
+
+    -- vardiff trigger thread
     (linkChild (c_handler local) =<<) . async . forever $ do
-        let retargetTime     = _vardiffRetargetTime . _settings $ global
-            target           = _vardiffTarget       . _settings $ global
-            targetAllowance  = _vardiffAllowance    . _settings $ global
-            minDifficulty    = _vardiffMin          . _settings $ global
+        threadDelay $ (_vardiffRetargetTime . _settings $ global) * 10^(6 :: Integer)
+        putMVar vardiffTrigger ()
 
-        -- wait till retarget
-        threadDelay $ retargetTime * 10^(6 :: Integer)
+    -- vardiff/ban thread
+    (linkChild (c_handler local) =<<) . async . forever $ do
+        -- wait till trigger
+        _ <- takeMVar vardiffTrigger
 
-        accepted    <- fromIntegral <$> (readIORef $ c_lastShares local)
-        currentDiff <- readIORef $ c_difficulty local
+        -- find out when was vardiff last triggered
+        currentTime <- getPOSIXTime
+        debugM "vardiff" "Vardiff activated"
 
-        -- convert accepted shares, difficulty to hashrate
-        let estimatedHash = ad2h (accepted            * (60 / fromIntegral retargetTime)) currentDiff
-            currentHash   = ad2h (fromIntegral target * (60 / fromIntegral retargetTime)) currentDiff
+        let setDiff diff = do
+                debugM "vardiff" $ "Vardiff client diff adjust: " ++ show (diff * 65536)
+                writeResponse Null $ SetDifficulty $ diff * 65536
+            banClient = do
+                writeChan (_banChan global) $ c_host local
+                infoM "client" $ "Banned " ++ c_host local ++ " for too many dead shares"
+                throw $ KillClientException "Too many dead shares submitted"
+            doNothing = return ()
 
-        -- check if hashrate is in vardiff allowance
-        unless (currentHash * (1 - targetAllowance) < estimatedHash && estimatedHash < currentHash * (1 + targetAllowance)) $ do
-            upstreamDiff <- readIORef $ _upstreamDiff global
-            -- cap difficulty to min and upstream
-            let newDiff = min (max minDifficulty $ ah2d (fromIntegral target * (60 / fromIntegral retargetTime)) estimatedHash) upstreamDiff
+        -- run computations inside the transaction
+        join $ atomically $ do
+            lastTime    <- readTVar $ c_lastVardiff local
 
-            writeIORef (c_difficulty local) newDiff
-            writeResponse Null $ SetDifficulty $ newDiff * 65536
+            let elapsedTime      = round $ currentTime - lastTime :: Integer
+                retargetTime     = _vardiffRetargetTime . _settings $ global
+                target           = _vardiffTarget       . _settings $ global
+                targetAllowance  = _vardiffAllowance    . _settings $ global
+                minDifficulty    = _vardiffMin          . _settings $ global
 
-        -- check the number of dead this client is submitting
-        lastShares <- readIORef (c_lastShares local)
-        lastSharesDead <- readIORef (c_lastSharesDead local)
+            lastShares     <- readTVar $ c_lastShares local
+            lastSharesDead <- readTVar $ c_lastSharesDead local
+            currentDiff    <- readTVar $ c_difficulty local
 
-        -- ban the client if 90% of submitted shares are dead
-        when (lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9) $ do
-            writeChan (_banChan global) $ c_host local
-            infoM "client" $ "Banned " ++ c_host local ++ " for too many dead shares"
-            throwIO $ KillClientException "Too many dead shares submitted"
+            -- clear the share counters
+            writeTVar (c_lastShares local) 0
+            writeTVar (c_lastSharesDead local) 0
+            writeTVar (c_lastVardiff local) currentTime
 
-        -- clear the share counters
-        writeIORef (c_lastShares local) 0
-        writeIORef (c_lastSharesDead local) 0
+            -- only run vardiff if it's time to do so, or we are over target
+            if lastShares > target || elapsedTime >= fromIntegral retargetTime - 5
+                then do
+                    -- convert shares, difficulty to hashrate
+                    let estimatedHash = ad2h (fromIntegral lastShares * (60 / fromIntegral elapsedTime)) currentDiff
+                        currentHash   = ad2h (fromIntegral target     * (60 / fromIntegral elapsedTime)) currentDiff
+
+                    -- ban the client if 90% of submitted shares are dead
+                    if | lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9 -> return banClient
+
+                    -- otherwise, check if hashrate is in vardiff allowance
+                       | currentHash * (1 - targetAllowance) < estimatedHash && estimatedHash < currentHash * (1 + targetAllowance) -> do
+                              upstreamDiff <- j_upstreamDiff <$> (readTVar .  c_job $ local)
+                              -- cap difficulty to min and upstream
+                              let newDiff = min (max minDifficulty $ ah2d (fromIntegral target * (60 / fromIntegral elapsedTime)) estimatedHash) upstreamDiff
+
+                              writeTVar (c_difficulty local) newDiff
+                              return $ setDiff newDiff
+
+                       | otherwise -> return doNothing
+                else do
+                    -- do nothing if no adjustment is required
+                    return doNothing
 
     -- process workers submissions (forever)
     process handle $ \case
-        Just (Request rid sub@(Submit{})) -> liftIO $ do
-            job  <- readIORef $ c_job local
-            diff <- readIORef $ c_difficulty local
-            work <- readIORef $ _currentWork global
+        Just (Request rid sub@(Submit{})) -> liftIO $  do
+            -- doesn't really matter if this race conditions
+            job  <- readTVarIO $ c_job local
+            diff <- readTVarIO $ c_difficulty local
 
-            let submitDiff = targetToDifficulty $ getPOW sub work (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
+            let submitDiff = targetToDifficulty $ getPOW sub (j_work job) (j_nonce1 job) (j_nonce2 job) (_extraNonce3Size . _settings $ global) scrypt
 
             -- verify job and share difficulty
             let valid = s_job sub == j_jobID job && submitDiff >= diff
             if valid
-                then do
-                    -- check if it meets upstream difficulty
-                    upstreamDiff <- readIORef $ _upstreamDiff global
-
+                then liftIO $ do
                     -- submit share to upstream
-                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (_username . _settings $ global), s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
+                    when (submitDiff >= j_upstreamDiff job) $ upstreamRequest $ sub { s_worker = (_username . _settings $ global), s_extraNonce2 = packEn2 (fst . j_nonce2 $ job) <> s_extraNonce2 sub }
 
                     -- write response
                     writeResponse rid $ General $ Right $ Bool True
-                else do
+                else liftIO $ do
                     -- stale or invalid
                     writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
             writeChan (_shareChan global) $ Share user submitDiff (_serverName . _settings $ global) valid
 
-            -- record share for vardiff
-            atomicModifyIORef' (c_lastShares local) $ (1+) &&& const ()
-            unless valid $ atomicModifyIORef' (c_lastSharesDead local) $ (1+) &&& const ()
+            -- record shares for vardiff
+            atomically $ do
+                modifyTVar' (c_lastShares local) (1+)
+                unless valid $ modifyTVar' (c_lastSharesDead local) (1+)
+
+            -- trigger vardiff if we are over target
+            lastShares <- readTVarIO (c_lastShares local)
+            when (lastShares >= (_vardiffShares . _settings $ global)) $ do
+                debugM "vardiff" "Vardiff activated by overtarget"
+                putMVar vardiffTrigger ()
 
         _ -> continue
 
@@ -472,15 +512,18 @@ handleServer global local = do
 
     -- thread to listen for server notifications
     (linkChild (s_handler local) =<<) . async $ do
+        -- save the upstream difficulty
+        upstreamDiff <- newIORef 0
+
         process handle $ liftIO . \case
             Just (Response _ wn@(WorkNotify{})) -> do
                 return ()
                 case fromWorkNotify wn of
                     Just work -> do
-                        writeIORef (_currentWork global) work
-                        writeChan (_notifyChan global) $ wn { wn_extraNonce1 = extraNonce1, wn_originalEn2Size = originalEn2Size }
+                        udiff <- readIORef upstreamDiff
+                        writeChan (_notifyChan global) $ (wn { wn_extraNonce1 = extraNonce1, wn_originalEn2Size = originalEn2Size }, work, udiff)
                     Nothing   -> errorM "server" "Invalid upstream work received"
-            Just (Response _ (SetDifficulty diff)) -> atomicWriteIORef (_upstreamDiff global) (diff / 65536)
+            Just (Response _ (SetDifficulty diff))         -> writeIORef upstreamDiff $ (diff / 65536)
             Just (Response (Number _) (General (Right _))) -> debugM "share" $ "Upstream share accepted"
             Just (Response (Number _) (General (Left  _))) -> debugM "share" $ "Upstream share rejected"
             _ -> return ()
@@ -504,7 +547,7 @@ handleDB global conn = do
         result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
         case result of
             Right _ -> return ()
-            Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ "): " ++ B8.unpack xs
+            Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
 
     -- checking IPs
     (link =<<) $ async $ forever $ readChan (_checkChan global) >>= \(host, callback) -> do
