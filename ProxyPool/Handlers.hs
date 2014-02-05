@@ -571,12 +571,12 @@ handleDB global conn = do
 
     -- checking IPs
     (link =<<) $ async $ forever $ readChan (g_checkChan global) >>= \(host, callback) -> do
-        result <- R.runRedis conn $ R.exists $ B8.pack host
+        result <- R.runRedis conn $ R.exists $ "ipban:" <> B8.pack host
         case result of
             Right val -> callback val
             _         -> callback False
 
     -- banning IPs
     forever $ readChan (g_banChan global) >>= \host -> do
-        _ <- R.runRedis conn $ R.setex (B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
+        _ <- R.runRedis conn $ R.setex ("ipban:" <> B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
         return ()
