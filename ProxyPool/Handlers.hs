@@ -448,7 +448,7 @@ handleClient global local = do
                     writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            writeChan (g_shareChan global) $ Share user submitDiff (s_serverName . g_settings $ global) valid
+            writeChan (g_shareChan global) $ Share user diff (s_serverName . g_settings $ global) valid
 
             -- record shares for vardiff
             atomically $ do
