@@ -58,7 +58,7 @@ data Work
            , w_merkle          :: [B.ByteString]
            , w_blockVersion    :: Word32
            , w_nBit            :: B.ByteString
-           } deriving (Show)
+           } deriving (Show, Eq)
 
 fromWorkNotify :: StratumResponse -> Maybe Work
 fromWorkNotify wn@(WorkNotify{}) = do

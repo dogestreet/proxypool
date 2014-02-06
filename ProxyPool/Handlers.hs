@@ -327,8 +327,8 @@ handleClient global local = do
                 writeResponse Null $ SetDifficulty $ newDiff * 65536
 
         -- immediately send a job to the client if possible
-        upstreamDiff <- readIORef $ g_upstreamDiff global
-        when (upstreamDiff /= 0) $ do
+        (work, _, _) <- readIORef $ g_work global
+        when (work /= emptyWork) $ do
             writeDiffNotify
             writeJobNotify
 
