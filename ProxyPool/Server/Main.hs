@@ -56,7 +56,7 @@ listenDownstream global port = do
                     (initaliseClient handle host global)
                     finaliseClient
                     (handleClient global)
-                `catches` [ Handler $ \(e :: IOException) -> warningM "client" $ "IOException in client: " ++ show e
+                `catches` [ Handler $ \(e :: IOException) -> infoM "client" $ "IOException in client: " ++ show e
                           , Handler $ \(e :: ProxyPoolException) -> infoM "client" $ "Killed: " ++ show e
                           ]
 
@@ -66,9 +66,15 @@ runDB global host auth = async $ forever $ do
     infoM "db" $ "Connecting to " ++  host
     conn <- R.connect $ R.defaultConnectInfo { R.connectHost = host, R.connectAuth = auth }
 
-    handleDB global conn `catches` [ Handler $ \(e :: IOException) -> warningM "db" $ "IOException in DB: " ++ show e
-                                   , Handler $ \(_ :: R.ConnectionLostException) -> warningM "db" "Redis connection lost"
-                                   ]
+    _ <- (waitCatch =<<) . async $ catches
+        (bracket
+            (initaliseDB conn)
+            finaliseDB
+            (handleDB global)
+        )
+        [ Handler $ \(e :: IOException) -> warningM "db" $ "IOException in DB: " ++ show e
+        , Handler $ \(e :: R.ConnectionLostException) -> warningM "db" $ "Redis connection lost" ++ show e
+        ]
 
     warningM "db" "Sleeping for 5 seconds before reconnection"
     threadDelay $ 5 * 10^(6 :: Int)

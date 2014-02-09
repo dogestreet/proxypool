@@ -9,7 +9,9 @@ module ProxyPool.Handlers (
   , handleServer
   , finaliseServer
 
+  , initaliseDB
   , handleDB
+  , finaliseDB
 
   , GlobalState
   , ServerSettings(..)
@@ -62,18 +64,18 @@ import qualified Data.ByteString.Base16.Lazy as BL16
 
 import qualified Database.Redis as R
 
-data HandlerState
-    = HandlerState { h_handle   :: Handle
+data HandlerState a
+    = HandlerState { h_handle   :: a
                    , h_children :: IORef [Async ()]
                    }
 
 data ServerState
-    = ServerState { s_handler    :: HandlerState
+    = ServerState { s_handler    :: HandlerState Handle
                   , s_writerChan :: Chan B.ByteString
                   }
 
 data ClientState
-    = ClientState { c_handler          :: HandlerState
+    = ClientState { c_handler          :: HandlerState Handle
                   , c_writerChan       :: Chan B.Builder
                   , c_nonce            :: IORef Integer
                   -- | Local difficulty managed by vardiff
@@ -89,6 +91,10 @@ data ClientState
                   -- | Hostname of the client
                   , c_host             :: String
                   }
+
+data DBState
+    = DBState { d_handler :: HandlerState R.Connection
+              }
 
 data ServerSettings
     = ServerSettings { s_serverName          :: T.Text
@@ -213,10 +219,10 @@ initaliseGlobal settings = GlobalState                          <$>
                            newChan                              <*>
                            return settings
 
-initaliseHandler :: Handle -> IO HandlerState
+initaliseHandler :: a -> IO (HandlerState a)
 initaliseHandler handle = HandlerState <$> return handle <*> newIORef []
 
-finaliseHandler :: HandlerState -> IO ()
+finaliseHandler :: HandlerState Handle -> IO ()
 finaliseHandler state = do
     hClose $ h_handle state
     readIORef (h_children state) >>= mapM_ cancel
@@ -235,7 +241,7 @@ initaliseClient handle host global = ClientState                   <$>
                                      return host
 
 -- | Record child threads as well as ensuring child thread death triggers an exception on the parent
-linkChild :: HandlerState -> Async () -> IO ()
+linkChild :: HandlerState a -> Async () -> IO ()
 linkChild handler asy = modifyIORef' (h_children $ handler) (asy:) >> link asy
 
 process :: (Monad m, MonadIO m, FromJSON a) => Handle -> (Maybe a -> EitherT b m ()) -> m b
@@ -367,7 +373,6 @@ handleClient global local = do
 
         -- find out when was vardiff last triggered
         currentTime <- getPOSIXTime
-        debugM "vardiff" "Vardiff activated"
 
         let setDiff diff = do
                 debugM "vardiff" $ "Vardiff client diff adjust: " ++ show (diff * 65536)
@@ -554,23 +559,28 @@ handleServer global local = do
 finaliseServer :: ServerState -> IO ()
 finaliseServer = finaliseHandler . s_handler
 
+initaliseDB :: R.Connection -> IO DBState
+initaliseDB conn = DBState <$> initaliseHandler conn
+
 -- | Handle database queries
-handleDB :: GlobalState -> R.Connection -> IO ()
-handleDB global conn = do
+handleDB :: GlobalState -> DBState -> IO ()
+handleDB global local = do
+    let channel = T.encodeUtf8 $ s_redisChanName . g_settings $ global
+        conn = h_handle . d_handler $ local
+
     -- test connection first
     _ <- R.runRedis conn R.ping
-
-    let channel = T.encodeUtf8 $ s_redisChanName . g_settings $ global
+    infoM "db" "Redis connected"
 
     -- handle share logging
-    (link =<<) $ async $ forever $ readChan (g_shareChan global) >>= \share -> do
+    (linkChild (d_handler local) =<<) $ async $ forever $ readChan (g_shareChan global) >>= \share -> do
         result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
         case result of
             Right _ -> return ()
             Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
 
     -- checking IPs
-    (link =<<) $ async $ forever $ readChan (g_checkChan global) >>= \(host, callback) -> do
+    (linkChild (d_handler local) =<<) $ async $ forever $ readChan (g_checkChan global) >>= \(host, callback) -> do
         result <- R.runRedis conn $ R.exists $ "ipban:" <> B8.pack host
         case result of
             Right val -> callback val
@@ -580,3 +590,6 @@ handleDB global conn = do
     forever $ readChan (g_banChan global) >>= \host -> do
         _ <- R.runRedis conn $ R.setex ("ipban:" <> B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
         return ()
+
+finaliseDB :: DBState -> IO ()
+finaliseDB local = readIORef (h_children . d_handler $ local) >>= mapM_ cancel
