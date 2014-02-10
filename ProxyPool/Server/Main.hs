@@ -89,24 +89,28 @@ runUpstream global url port = async $ forever $ do
 
     case upstream of
         []  -> criticalM "server" "Could not resolve upstream server"
-        x:_ -> bracket
-                   (do
-                        sock <- socket AF_INET Stream defaultProtocol
-                        -- set up socket
-                        setSocketOption sock NoDelay 1
-                        _ <- configureKeepAlive sock
+        x:_ -> do
+            _ <- (waitCatch =<<) . async $ catches
+                (bracket
+                    (do
+                         sock <- socket AF_INET Stream defaultProtocol
+                         -- set up socket
+                         setSocketOption sock NoDelay 1
+                         _ <- configureKeepAlive sock
 
-                        infoM "server" $ "Connecting to upstream: " ++ url ++ ":" ++ show port
-                        connectTimeout sock (addrAddress x) 20
+                         infoM "server" $ "Connecting to upstream: " ++ url ++ ":" ++ show port
+                         connectTimeout sock (addrAddress x) 20
 
-                        handle <- socketToHandle sock ReadWriteMode
-                        initaliseServer handle
-                   )
-                   finaliseServer
-                   (handleServer global)
-               `catches` [ Handler $ \(e :: IOException) -> warningM "server" $ "IOException in server: " ++ show e
-                         , Handler $ \(e :: ProxyPoolException) -> warningM "server" $ "Exception thrown: " ++ show e
-                         ]
+                         handle <- socketToHandle sock ReadWriteMode
+                         initaliseServer handle
+                    )
+                    finaliseServer
+                    (handleServer global)
+                )
+                [ Handler $ \(e :: IOException) -> warningM "server" $ "IOException in server: " ++ show e
+                , Handler $ \(e :: ProxyPoolException) -> warningM "server" $ "Exception thrown: " ++ show e
+                ]
+            return ()
 
     warningM "server" "Sleeping for 5 seconds before reconnection"
     threadDelay $ 5 * 10^(6 :: Int)

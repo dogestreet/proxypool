@@ -416,7 +416,7 @@ handleClient global local = do
                     if | lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9 -> return banClient
 
                     -- otherwise, check if hashrate is in vardiff allowance
-                       | currentHash * (1 - targetAllowance) < estimatedHash && estimatedHash < currentHash * (1 + targetAllowance) -> do
+                       | currentHash * (1 - targetAllowance) > estimatedHash || estimatedHash > currentHash * (1 + targetAllowance) -> do
                               -- cap difficulty to min and upstream
                               let newDiff = min (max minDifficulty $ ah2d (fromIntegral target * (60 / fromIntegral elapsedTime)) estimatedHash) upstreamDiff
 
