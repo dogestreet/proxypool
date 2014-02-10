@@ -5,7 +5,7 @@ module Main where
 import ProxyPool.Network (configureKeepAlive, connectTimeout)
 import ProxyPool.Handlers
 
-import Control.Monad (forever, mzero, when)
+import Control.Monad (forever)
 import Control.Exception hiding (handle)
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<$>))
@@ -30,9 +30,6 @@ import qualified Data.ByteString.Lazy as BL
 
 import Network
 import Network.Socket hiding (accept)
-
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Maybe
 
 import Control.Concurrent.Async
 
@@ -148,13 +145,10 @@ main = withSocketsDo $ do
     global <- initaliseGlobal config
 
     -- link together child threads
-    (link =<<) $ listenDownstream global (_localPort config)
-    (link =<<) $ runDB global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
-    (link =<<) $ runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
+    listener <- listenDownstream global (_localPort config)
+    db       <- runDB global (T.unpack $ _redisHost config) (T.encodeUtf8 <$> _redisAuth config)
+    upstream <- runUpstream global (T.unpack $ _upstreamHost config) (_upstreamPort config)
 
-    -- hack to get control-c working
-    _ <- runMaybeT $ forever $ do
-        xs <- liftIO getLine
-        when (xs == "exit") mzero
-
+    -- server must crash if any of these three fails
+    _ <- waitAny [listener, db, upstream]
     return ()
