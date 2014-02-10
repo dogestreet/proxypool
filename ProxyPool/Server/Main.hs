@@ -137,7 +137,7 @@ main = withSocketsDo $ do
 
     -- start the logger
     logger <- flip setFormatter (tfLogFormatter "%F %T" "[$time][$loggername][$prio] $msg") <$> streamHandler stdout DEBUG
-    updateGlobalLogger rootLoggerName $ setLevel DEBUG . setHandlers [logger]
+    updateGlobalLogger rootLoggerName $ setLevel (read . s_logLevel $ config) . setHandlers [logger]
 
     -- don't let the process die from a broken pipe
     _ <- installHandler sigPIPE Ignore Nothing

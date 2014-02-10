@@ -1,0 +1,27 @@
+{
+    "serverName": "Test server"
+  , "upstreamHost": "stratum.example.com"
+  , "upstreamPort": 9555
+
+  , "localPort": 9555
+
+  , "username": "DATkurgeSP7nHDnSade7GbrGaLK3E4Aezc+0.000500"
+  , "password": "anything"
+
+  , "redisHost": "localhost"
+  , "redisAuth": "my redis auth"
+  , "redisChanName": "shares"
+
+  , "publicKeyByte": 30
+  , "extraNonce2Size": 2
+  , "extraNonce3Size": 2
+
+  , "vardiffRetargetTime": 180
+  , "vardiffTarget": 10
+  , "vardiffAllowance": 0.25
+  , "vardiffMin": 0.000001
+  , "vardiffShares": 40
+
+  , "banExpiry": 20
+  , "logLevel": "INFO"
+}

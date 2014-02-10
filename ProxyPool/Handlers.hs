@@ -132,6 +132,7 @@ data ServerSettings
                      , s_vardiffShares       :: Int
                      -- | How many minutes does ban take to expire
                      , s_banExpiry           :: Int
+                     , s_logLevel            :: String
                      } deriving (Show)
 
 instance FromJSON ServerSettings where
@@ -153,7 +154,8 @@ instance FromJSON ServerSettings where
                            v .: "vardiffAllowance"    <*>
                            v .: "vardiffMin"          <*>
                            v .: "vardiffShares"       <*>
-                           v .: "banExpiry"
+                           v .: "banExpiry"           <*>
+                           v .: "logLevel"
 
     parseJSON _          = mzero
 
