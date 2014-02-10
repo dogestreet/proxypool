@@ -292,11 +292,12 @@ handleClient global local = do
         line <- readChan (c_writerChan local)
         B.hPutBuilder handle $ line <> B.char8 '\n'
 
-    -- check if the IP is banned
+    -- check if the IP is banned, redis timout in 30 seconds
     banned <- liftIO $ do
         waiter <- newEmptyMVar
         writeChan (g_checkChan global) (c_host local, putMVar waiter)
-        takeMVar waiter
+        response <- timeout (30 * 10^(6 :: Int)) $ takeMVar waiter
+        return $ maybe False id response
 
     -- wait for mining.subscription call
     initalised <- timeout (30 * 10^(6 :: Int)) $ process handle $ \case
