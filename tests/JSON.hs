@@ -12,6 +12,7 @@ import Test.Tasty.Hspec
 tests :: TestTree
 tests = testGroup "JSON" [ testCase "Parser tests" $ parseSpec (subscription, auth, submission, work, set_diff, initalise, success, failure)
                          , testCase "Generator tests" $ parseSpec generateJSON
+                         , testCase "Parser test series 2" parseSpec2
                          ]
     where  subscription = "{\"id\": 2, \"method\": \"mining.subscribe\", \"params\": []}"
            auth         = "{\"id\": 3, \"method\": \"mining.authorize\", \"params\": [\"DReCBKnatV3DuWez4YJWkQfpUxGknzmkN\", \"asdf\"]}"
@@ -130,3 +131,21 @@ generateJSON = ( encode $ Request (Number 2) subscription
         initalise    = Initalise "" 4
         success      = General $ Right $ Bool True
         failure      = General $ Left $ String "error"
+
+parseSpec2 :: Spec
+parseSpec2 = do
+    let work = "{\"params\": [\"698e\", \"ae35787d295f6c31b8f5fb8f928bc6de9f09b258d144b9787653cb873f8fba07\", \"01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff2b032f7801062f503253482f041520fa5208\", \"112f646f6765686f757365444f546f72672f0000000001c92af462201400001976a914040abf8ea5a784e4fbcd6e0561f7f2e3e9f9278c88ac00000000\", [\"25d3d3d567994dc518f3780c47f752b716957d6f694218224012b6bea2c554af\", \"847c96b756cfa334e84184164a421a24cc5e09680fedcb7a7f4f00626614d033\", \"960eadb454ed9b8b003285482f9d08524b58143bf1e7db67205481d1dcd6f20e\", \"9bbdc9b6b023abacc9e50c612167793ea7d31d5d7bf6de020d0b06bc130edb9f\", \"db924b208196a97b54f3f7c04bd1bf53edbecdc27cb060ff0f711f87f7268d7d\", \"bfdc15c471163c54c077540b61e5d35100c40e4258fbb1545b9244b202d6d040\", \"8fe4cd6597c9c63f0a25e91bf6bd3a2ec113d40c4d0fafcb983d691ab5303746\", \"08aadb80c6947f5f094d1744acbcde51f2a1afdb408e69ee651de63ad7eea3b4\"], \"00000001\", \"1b2715d6\", \"52fa2012\", true], \"id\": null, \"method\": \"mining.notify\"}"
+    describe "Stratum job" $ do
+        it "Parse work notification 2" $ do
+            case decode work of
+                Just (Response _ (WorkNotify job prevHash cb1 cb2 merkle blockVer nBit nTime clean)) -> do
+                    job             `shouldBe` "698e"
+                    prevHash        `shouldBe` "ae35787d295f6c31b8f5fb8f928bc6de9f09b258d144b9787653cb873f8fba07"
+                    cb1             `shouldBe` "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff2b032f7801062f503253482f041520fa5208"
+                    cb2             `shouldBe` "112f646f6765686f757365444f546f72672f0000000001c92af462201400001976a914040abf8ea5a784e4fbcd6e0561f7f2e3e9f9278c88ac00000000"
+                    V.toList merkle `shouldBe` ["25d3d3d567994dc518f3780c47f752b716957d6f694218224012b6bea2c554af", "847c96b756cfa334e84184164a421a24cc5e09680fedcb7a7f4f00626614d033", "960eadb454ed9b8b003285482f9d08524b58143bf1e7db67205481d1dcd6f20e", "9bbdc9b6b023abacc9e50c612167793ea7d31d5d7bf6de020d0b06bc130edb9f", "db924b208196a97b54f3f7c04bd1bf53edbecdc27cb060ff0f711f87f7268d7d", "bfdc15c471163c54c077540b61e5d35100c40e4258fbb1545b9244b202d6d040", "8fe4cd6597c9c63f0a25e91bf6bd3a2ec113d40c4d0fafcb983d691ab5303746", "08aadb80c6947f5f094d1744acbcde51f2a1afdb408e69ee651de63ad7eea3b4"]
+                    blockVer        `shouldBe` "00000001"
+                    nBit            `shouldBe` "1b2715d6"
+                    nTime           `shouldBe` "52fa2012"
+                    clean           `shouldBe` True
+                _ -> expectationFailure "failed"

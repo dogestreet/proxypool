@@ -512,17 +512,11 @@ handleServer global local = do
     infoM "server" "Sending authorization"
     writeRequest $ Request (Number 2) $ Authorize (s_username . g_settings $ global) (s_password . g_settings $ global)
 
-    -- wait for authorization response
-    process handle $ \case
-        Just (Response (Number 2) (General (Right _))) -> finish ()
-        Just (Response (Number 2) (General (Left _)))  -> error "Upstream authorisation failed"
-        _ -> continue
-
-    infoM "server" "Upstream authorized"
-
     -- thread to listen for server notifications
     (linkChild (s_handler local) =<<) . async $ do
         process handle $ liftIO . \case
+            Just (Response (Number 2) (General (Right _))) -> infoM "server" "Upstream authorized"
+            Just (Response (Number 2) (General (Left _)))  -> throwIO $ KillServerException "Upstream authorisation failed"
             Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) ->
                 case fromWorkNotify wn of
                     Just work -> do
