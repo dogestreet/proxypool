@@ -128,6 +128,7 @@ data ServerSettings
                      , s_vardiffAllowance    :: Double
                      -- | Minimum allowable difficulty
                      , s_vardiffMin          :: Double
+                     , s_vardiffInitial      :: Double
                      -- | Number of shares before vardiff is forced to activate, varidiff runs if the number of shares submitted is > this or _vardiffRetargetTime seconds have elapsed
                      , s_vardiffShares       :: Int
                      -- | How many minutes does ban take to expire
@@ -153,6 +154,7 @@ instance FromJSON ServerSettings where
                            v .: "vardiffTarget"       <*>
                            v .: "vardiffAllowance"    <*>
                            v .: "vardiffMin"          <*>
+                           v .: "vardiffInitial"      <*>
                            v .: "vardiffShares"       <*>
                            v .: "banExpiry"           <*>
                            v .: "logLevel"
@@ -235,7 +237,7 @@ initaliseClient handle host global = ClientState                   <$>
                                      initaliseHandler handle       <*>
                                      newChan                       <*>
                                      newIORef  0                   <*>
-                                     newTVarIO 0.000488            <*>
+                                     newTVarIO (s_vardiffInitial . g_settings $ global) <*>
                                      newTVarIO 0                   <*>
                                      newTVarIO 0                   <*>
                                      newTVarIO 0                   <*>

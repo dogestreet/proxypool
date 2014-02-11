@@ -19,7 +19,8 @@
   , "vardiffRetargetTime": 180
   , "vardiffTarget": 10
   , "vardiffAllowance": 0.25
-  , "vardiffMin": 0.000001
+  , "vardiffMin": 0.0002
+  , "vardiffInitial": 0.0002
   , "vardiffShares": 40
 
   , "banExpiry": 20
