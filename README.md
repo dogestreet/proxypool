@@ -1,20 +1,21 @@
 # proxypool
+[![Build Status](https://travis-ci.org/dogestreet/proxypool.png?branch=master)](https://travis-ci.org/dogestreet/proxypool)
 
 A Stratum to Stratum proxy pool. Released under AGPL-V3.
 
-Proxypool is a pool server that splits the work from an upstream pool server and redistributes them to its miners, handling both shares submission and share logging for it's patrons.
+`proxypool` is a pool server that splits the work from an upstream pool server and redistributes them to its miners, handling both shares submission and share logging for it's patrons.
 
-Currently running on [Doge Street](http://proxypool.doge.st)
+Hosted on [Doge Street mining pool](http://proxypool.doge.st)
 
 ## Features ##
 
-* Vardiff
-* Address validation
-* IP based bans for too many invalid shares
-* Redis pubsub for share logging
+ * Vardiff
+ * Address validation
+ * IP based bans for too many invalid shares
+ * Redis pubsub for share logging
 
 Currently only Scrypt is supported for upstream servers.
-The source does not yet include the CPPSRB payout scripts, it will be released once I clean them up.
+The source does not yet include the [CPPSRB](http://eligius.st/~gateway/faq/simple-terms-what-summary-cppsrb) payout scripts, it will be released once I clean them up.
 
 ## How it works (how to proxy Stratrum) ##
 The main problem to solve is how to generate unique work for every proxypool client.
@@ -55,3 +56,7 @@ Variable difficulty allows the server to dynamically adjust share difficulty for
 
 ### Invalid share bans ###
 Since the proxy pool validates shares before submitting to upstream, profiling results show that checking shares consume around 50% of the server's CPU time. A malicious client sending invalid shares can cause a denial of service for the pool server. The server bans a client when over 90% of submitted shares are dead. The ban expires in `banExpiry` minutes.
+
+## References ##
+ * [Stratum protocol specifications](https://mining.bitcoin.cz/stratum-mining)
+ * [Stratum protocol description from BTCGuild](https://www.btcguild.com/new_protocol.php)
