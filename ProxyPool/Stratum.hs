@@ -16,7 +16,6 @@ import Data.Aeson.Types
 import qualified Data.Vector as V
 
 import Control.Applicative ((<|>))
-import Debug.Trace
 
 data Request  = Request Value StratumRequest deriving (Show)
 data Response = Response Value StratumResponse deriving (Show)

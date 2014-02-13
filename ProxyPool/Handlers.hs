@@ -78,6 +78,7 @@ data ClientState
     = ClientState { c_handler          :: HandlerState Handle
                   , c_writerChan       :: Chan B.Builder
                   , c_nonce            :: IORef Integer
+                  , c_prevNonce        :: IORef Integer
                   -- | Local difficulty managed by vardiff
                   , c_difficulty       :: TVar Double
                   -- | Number of shares submitted by the client since last vardiff retarget
@@ -168,6 +169,8 @@ data GlobalState
                   , g_extraNonce1    :: IORef B.ByteString
                   , g_upstreamDiff   :: IORef Double
                   , g_work           :: IORef (Work, B.Builder, B.Builder)
+                  -- | Submit stales since they are still useful for p2pool
+                  , g_prevWork       :: IORef (Work, B.Builder, B.Builder)
                   -- | Channel for work notifications
                   , g_notifyChan     :: Chan JobNotify
                   -- | Channel for upstream requests
@@ -216,6 +219,7 @@ initaliseGlobal settings = GlobalState                          <$>
                            newIORef ""                          <*>
                            newIORef 0                           <*>
                            newIORef (emptyWork, mempty, mempty) <*>
+                           newIORef (emptyWork, mempty, mempty) <*>
                            newChan                              <*>
                            newChan                              <*>
                            newChan                              <*>
@@ -236,6 +240,7 @@ initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
 initaliseClient handle host global = ClientState                   <$>
                                      initaliseHandler handle       <*>
                                      newChan                       <*>
+                                     newIORef  0                   <*>
                                      newIORef  0                   <*>
                                      newTVarIO (s_vardiffInitial . g_settings $ global) <*>
                                      newTVarIO 0                   <*>
@@ -324,6 +329,9 @@ handleClient global local = do
 
                 -- get generate unique client nonce
                 nonce <- atomicModifyIORef' (g_nonceCounter global) $ join (&&&) $ \x -> (x + 1) `mod` (2 ^ (8 * en2Size))
+
+                -- save the previous nonce
+                writeIORef (c_prevNonce local) =<< readIORef (c_nonce local)
                 writeIORef (c_nonce local) nonce
 
                 writeResponseRaw $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
@@ -436,34 +444,41 @@ handleClient global local = do
     process handle $ \case
         Just (Request rid sub@(Submit{})) -> liftIO $ do
             -- doesn't really matter if this race conditions
-            diff          <- readTVarIO $ c_difficulty local
-            nonce         <- readIORef $ c_nonce local
-            (work, _, _)  <- readIORef $ g_work global
-            en1           <- readIORef $ g_extraNonce1 global
-            upstreamDiff  <- readIORef $ g_upstreamDiff global
+            diff             <- readTVarIO $ c_difficulty local
+            nonce            <- readIORef $ c_nonce local
+            prevNonce        <- readIORef $ c_prevNonce local
+            (work, _, _)     <- readIORef $ g_work global
+            (prevWork, _, _) <- readIORef $ g_prevWork global
+            en1              <- readIORef $ g_extraNonce1 global
+            upstreamDiff     <- readIORef $ g_upstreamDiff global
 
-            let submitDiff = targetToDifficulty $ getPOW sub work en1 (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt
+            (submitDiff, fresh) <-
+                if | s_job sub == w_job work ->
+                       return (targetToDifficulty $ getPOW sub work en1 (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, True)
+                   | s_job sub == w_job prevWork ->
+                       return (targetToDifficulty $ getPOW sub prevWork en1 (prevNonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, False)
+                   | otherwise -> return (0, False)
 
             -- verify job and share difficulty
-            let valid = s_job sub == w_job work && submitDiff >= diff
-            if valid
+            if submitDiff >= diff
+                -- submit share to upstream, even if it's stale. Since stales in P2Pool can still find blocks
                 then liftIO $ do
-                    -- submit share to upstream
                     when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (s_username . g_settings $ global), s_extraNonce2 = (T.decodeUtf8 . BL.toStrict . packEn2 $ nonce) <> s_extraNonce2 sub }
 
-                    -- write response
-                    writeResponse rid $ General $ Right $ Bool True
-                else liftIO $ do
-                    -- stale or invalid
-                    writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
+                    if fresh
+                        then writeResponse rid $ General $ Right $ Bool fresh
+                        else writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-4), String "Stale"]
+
+                -- didn't meet the difficulty requirement or job is too far back
+                else liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            writeChan (g_shareChan global) $ Share user diff (s_serverName . g_settings $ global) valid
+            writeChan (g_shareChan global) $ Share user diff (s_serverName . g_settings $ global) fresh
 
             -- record shares for vardiff
             atomically $ do
                 modifyTVar' (c_lastShares local) (1+)
-                unless valid $ modifyTVar' (c_lastSharesDead local) (1+)
+                unless fresh $ modifyTVar' (c_lastSharesDead local) (1+)
 
             -- trigger vardiff if we are over target
             lastShares <- readTVarIO (c_lastShares local)
@@ -538,6 +553,8 @@ handleServer global local = do
                                                   ]
                             !part2    = part2a <> part2b <> part2c
 
+                        -- save the work before so we can still validate shares
+                        writeIORef (g_prevWork global) =<< readIORef (g_work global)
                         writeIORef (g_work global) (work, part1, part2)
 
                         -- notify listeners
