@@ -604,7 +604,9 @@ handleDB global local = do
 
     -- banning IPs
     forever $ readChan (g_banChan global) >>= \host -> do
-        _ <- R.runRedis conn $ R.setex ("ipban:" <> B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
+        -- There are cases cases when work notification is out of sync
+        -- TODO: reenable this mechanism once it's resolved
+        -- _ <- R.runRedis conn $ R.setex ("ipban:" <> B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
         return ()
 
 finaliseDB :: DBState -> IO ()
