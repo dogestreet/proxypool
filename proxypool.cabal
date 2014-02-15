@@ -19,7 +19,7 @@ library
     c-sources:           scrypt/scrypt.c
     cc-options:          -Wall -std=c99
     include-dirs:        include
-    ghc-options:         -Wall
+    ghc-options:         -Wall -threaded
     ghc-prof-options:    -auto-all -caf-all -rtsopts
     exposed-modules:     ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
     -- other-extensions:
@@ -49,7 +49,7 @@ library
 executable server
     hs-source-dirs:      ProxyPool/Server
     main-is:             Main.hs
-    ghc-options:         -Wall
+    ghc-options:         -Wall -threaded
     ghc-prof-options:    -auto-all -caf-all -rtsopts
     build-depends:       proxypool
                        , base
