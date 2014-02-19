@@ -38,7 +38,16 @@ import qualified Database.Redis as R
 -- | Manage incoming connections
 listenDownstream :: GlobalState -> Word16 -> IO (Async ())
 listenDownstream global port = do
-    sock <- listenOn $ PortNumber $ fromIntegral port
+    sock <- do
+        bracketOnError
+            (socket AF_INET Stream defaultProtocol)
+            (Network.Socket.sClose)
+            (\s -> do
+                setSocketOption s ReuseAddr 1
+                bindSocket s (SockAddrInet (fromIntegral port) iNADDR_ANY)
+                listen s 10000
+                return s
+            )
 
     setSocketOption sock ReuseAddr 1
     setSocketOption sock NoDelay 1
