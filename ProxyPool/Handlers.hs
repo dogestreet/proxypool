@@ -392,7 +392,7 @@ handleClient global local = do
                 writeResponse Null $ SetDifficulty $ diff * 65536
             banClient = do
                 writeChan (g_banChan global) $ c_host local
-                infoM "client" $ "Banned " ++ c_host local ++ " for too many dead shares"
+                infoM "client" $ "Disconnected  " ++ c_host local ++ " for too many dead shares"
                 throw $ KillClientException "Too many dead shares submitted"
             doNothing = return ()
 

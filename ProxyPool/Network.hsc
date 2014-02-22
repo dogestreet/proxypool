@@ -1,15 +1,18 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
 
 #include <sys/socket.h>
+#include <arpa/inet.h>
+
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
 -- | Network module for proxy pool, fixes everything that's wrong with Haskell's network package
-module ProxyPool.Network (configureKeepAlive, connectTimeout) where
+module ProxyPool.Network (configureKeepAlive, connectTimeout, serialiseAddr) where
 
-import Foreign
-import Foreign.C.Types
-import Foreign.C.Error
+import Foreign hiding (unsafePerformIO)
+import Foreign.C
+
+import System.IO.Unsafe (unsafePerformIO)
 
 import Network
 import Network.Socket
@@ -26,7 +29,10 @@ foreign import ccall unsafe "setsockopt"
     c_setsockopt :: CInt -> CInt -> CInt -> Ptr CInt -> CInt -> IO CInt
 
 foreign import ccall unsafe "connect"
-    c_connect :: CInt -> Ptr SockAddr -> CInt{-CSockLen???-} -> IO CInt
+    c_connect :: CInt -> Ptr SockAddr -> CInt -> IO CInt
+
+foreign import ccall unsafe "inet_ntop"
+    c_inet_ntop :: CInt -> Ptr Word32 -> Ptr CChar -> CSize -> IO (Ptr CChar)
 
 -- | Sets TCP_KEEPIDLE, TCP_KEEPINTVL and TCP_KEEPCNT if avaliable
 configureKeepAlive :: Socket -> IO Bool
@@ -46,9 +52,22 @@ configureKeepAlive sock = do
     return False
 #endif
 
+-- | Get the IP of the address
+serialiseAddr :: SockAddr -> String
+serialiseAddr (SockAddrInet _ addr) = unsafePerformIO $ do
+    alloca $ \input -> allocaBytes (#const INET_ADDRSTRLEN) $ \output -> do
+        poke input addr
+        result <- c_inet_ntop (#const AF_INET) input output (#const INET_ADDRSTRLEN)
+        if result == output
+            then peekCString output
+            else return "serialisation failed"
+
+serialiseAddr (SockAddrInet6 _ _ _ _) = "TODO: ipv6 serialisation"
+serialiseAddr (SockAddrUnix xs) = xs
+
 -- | Modified version of 'connect' with a timeout
 connectTimeout :: Socket   -- Unconnected Socket
-               -> SockAddr -- Socket address stuff
+               -> SockAddr -- Socket address
                -> Int      -- Timeout, in seconds
                -> IO ()
 connectTimeout sock@(MkSocket s _family _stype _protocol socketStatus) addr timeout = do

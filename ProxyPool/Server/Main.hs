@@ -2,7 +2,7 @@
 -- | Entry point for proxy pool
 module Main where
 
-import ProxyPool.Network (configureKeepAlive, connectTimeout)
+import ProxyPool.Network (configureKeepAlive, connectTimeout, serialiseAddr)
 import ProxyPool.Handlers
 
 import Control.Monad (forever)
@@ -28,8 +28,7 @@ import Data.Text.Encoding as T
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 
-import Network
-import Network.Socket hiding (accept)
+import Network.Socket
 
 import Control.Concurrent.Async
 
@@ -38,16 +37,15 @@ import qualified Database.Redis as R
 -- | Manage incoming connections
 listenDownstream :: GlobalState -> Word16 -> IO (Async ())
 listenDownstream global port = do
-    sock <- do
-        bracketOnError
-            (socket AF_INET Stream defaultProtocol)
-            (Network.Socket.sClose)
-            (\s -> do
-                setSocketOption s ReuseAddr 1
-                bindSocket s (SockAddrInet (fromIntegral port) iNADDR_ANY)
-                listen s 10000
-                return s
-            )
+    sock <- bracketOnError
+                (socket AF_INET Stream defaultProtocol)
+                (Network.Socket.sClose)
+                (\s -> do
+                    setSocketOption s ReuseAddr 1
+                    bindSocket s (SockAddrInet (fromIntegral port) iNADDR_ANY)
+                    listen s 10000
+                    return s
+                )
 
     setSocketOption sock ReuseAddr 1
     setSocketOption sock NoDelay 1
@@ -56,10 +54,11 @@ listenDownstream global port = do
     infoM "client" $ "Listening on localhost:" ++ show port
     -- listen for connections on separate thread
     async . forever $ do
-        (handle, host, _) <- accept sock
+        (clientSock, rawAddr) <- accept sock
+        handle <- socketToHandle clientSock ReadWriteMode
         -- handle each incoming connection on a separate thread
         async $ bracket
-                    (initaliseClient handle host global)
+                    (initaliseClient handle (serialiseAddr rawAddr) global)
                     finaliseClient
                     (handleClient global)
                 `catches` [ Handler $ \(e :: IOException) -> infoM "client" $ "IOException in client: " ++ show e
