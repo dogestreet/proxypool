@@ -234,6 +234,7 @@ finaliseHandler :: HandlerState Handle -> IO ()
 finaliseHandler state = do
     hClose $ h_handle state
     readIORef (h_children state) >>= mapM_ cancel
+    writeIORef (h_children state) []
 
 -- | Initalises client state
 initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
