@@ -482,7 +482,7 @@ handleServer global local = do
         handle = h_handle . s_handler $ local
 
         writeRequest :: Request -> IO ()
-        writeRequest = writeChan (s_writerChan local) . BL.toStrict . encode
+        writeRequest !req = writeChan (s_writerChan local) . BL.toStrict . encode $ req
 
     -- thread to sequence writes
     (linkChild (s_handler local) =<<) . async . forever $ do
