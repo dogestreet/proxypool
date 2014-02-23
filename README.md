@@ -5,13 +5,12 @@ A Stratum to Stratum proxy pool. Released under AGPL-V3.
 
 `proxypool` is a pool server that splits work from an upstream pool server and redistributes them to its miners, handling both share submission and sharelogging for it's patrons.
 
-Hosted on [Doge Street mining pool](http://proxypool.doge.st)
+Hosted on [Doge Street mining pool](http://doge.st)
 
 ## Features ##
 
  * Vardiff
  * Address validation
- * IP based bans for too many invalid shares
  * Redis pubsub for share logging
 
 Currently only Scrypt is supported for upstream servers.
@@ -57,8 +56,8 @@ Variable difficulty allows the server to dynamically adjust share difficulty for
 | `vardiffInitial`       | The initial share difficulty
 | `vardiffShares`        | The number of shares submitted in `vardiffRetargetTime` before a difficulty adjustment is forced
 
-### Invalid share bans ###
-Since the proxy pool validates shares before submitting to the upstream, profiling results show that checking shares consume around 50% of the server's CPU time. A malicious client sending invalid shares can cause a denial of service for the pool server. The server bans a client when over 90% of submitted shares are dead. The ban expires in `banExpiry` minutes.
+### Invalid share kicks ###
+Since the proxy pool validates shares before submitting to the upstream, profiling results show that checking shares consume around 50% of the server's CPU time. A malicious client sending invalid shares can cause a denial of service for the pool server. The server disconnects a client if they submit over 90% dead shares.
 
 ## References ##
  * [Stratum protocol specifications](https://mining.bitcoin.cz/stratum-mining)

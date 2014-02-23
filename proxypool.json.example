@@ -23,6 +23,5 @@
   , "vardiffInitial": 0.0002
   , "vardiffShares": 40
 
-  , "banExpiry": 20
   , "logLevel": "INFO"
 }

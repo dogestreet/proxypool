@@ -132,8 +132,6 @@ data ServerSettings
                      , s_vardiffInitial      :: Double
                      -- | Number of shares before vardiff is forced to activate, varidiff runs if the number of shares submitted is > this or _vardiffRetargetTime seconds have elapsed
                      , s_vardiffShares       :: Int
-                     -- | How many minutes does ban take to expire
-                     , s_banExpiry           :: Int
                      , s_logLevel            :: String
                      } deriving (Show)
 
@@ -157,7 +155,6 @@ instance FromJSON ServerSettings where
                            v .: "vardiffMin"          <*>
                            v .: "vardiffInitial"      <*>
                            v .: "vardiffShares"       <*>
-                           v .: "banExpiry"           <*>
                            v .: "logLevel"
 
     parseJSON _          = mzero
@@ -177,10 +174,6 @@ data GlobalState
                   , g_upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
                   , g_shareChan      :: Chan Share
-                  -- | Channel used to ban hosts
-                  , g_banChan        :: Chan String
-                  -- | Channel used to request checks on the host
-                  , g_checkChan      :: Chan (String, Bool -> IO ())
                   , g_settings       :: ServerSettings
                   }
 
@@ -201,7 +194,7 @@ instance ToJSON Share where
                                                , "valid" .= valid
                                                ]
 
-data ProxyPoolException = KillClientException { _reason :: String }
+data ProxyPoolException = KillClientException { _id :: Integer, _host :: String, _reason :: String }
                         | KillServerException { _reason :: String }
                         deriving (Show, Typeable)
 
@@ -220,8 +213,6 @@ initaliseGlobal settings = GlobalState                          <$>
                            newIORef 0                           <*>
                            newIORef (emptyWork, mempty, mempty) <*>
                            newIORef (emptyWork, mempty, mempty) <*>
-                           newChan                              <*>
-                           newChan                              <*>
                            newChan                              <*>
                            newChan                              <*>
                            newChan                              <*>
@@ -295,19 +286,15 @@ handleClient global local = do
             -- send request to the upstream listener
             writeChan (g_upstreamChan global) $ Request (Number . fromInteger $ rid) request
 
+        killClient :: String -> IO ()
+        killClient = throwIO . KillClientException (c_id local) (c_host local)
+
     infoM "client" $ "Client (" ++ show (c_id local) ++ ") from " ++ show (c_host local) ++ " connected"
 
     -- thread to sequence writes
     (linkChild (c_handler local) =<<) . async . forever $ do
         line <- readChan (c_writerChan local)
         B.hPutBuilder handle $ line <> B.char8 '\n'
-
-    -- check if the IP is banned, redis timout in 30 seconds
-    banned <- liftIO $ do
-        waiter <- newEmptyMVar
-        writeChan (g_checkChan global) (c_host local, putMVar waiter)
-        response <- timeout (30 * 10^(6 :: Int)) $ takeMVar waiter
-        return $ maybe False id response
 
     -- wait for mining.subscription call
     initalised <- timeout (30 * 10^(6 :: Int)) $ process handle $ \case
@@ -318,10 +305,10 @@ handleClient global local = do
             finish ()
         _ -> continue
 
-    maybe (throwIO $ KillClientException "Took too long to initalise") (const $ return ()) initalised
+    maybe (killClient "Took too long to initalise") (const $ return ()) initalised
 
     -- proxy server notifications
-    (linkChild (c_handler local) =<<) . async $ unless banned $ do
+    (linkChild (c_handler local) =<<) . async $ do
         -- duplicate server notification channel
         localNotifyChan <- dupChan (g_notifyChan global)
 
@@ -362,11 +349,11 @@ handleClient global local = do
             -- check if the address they are using is a valid address
             let valid = validateAddress (s_publickeyByte . g_settings $ global) $ T.encodeUtf8 user
 
-            if | banned -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-1), String $ "Your IP address is banned for too many invalid share submissions, the ban expires in " <> (T.pack . show . s_banExpiry . g_settings $ global) <> " minutes" ]
-               | valid  -> do
-                     liftIO $ writeResponse rid $ General $ Right $ Bool True
-                     finish user
-               | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-2), String "Username is not a valid address" ]
+            if valid
+                then do
+                    liftIO $ writeResponse rid $ General $ Right $ Bool True
+                    finish user
+                else liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [ Number (-2), String "Username is not a valid address" ]
 
         _ -> continue
 
@@ -380,7 +367,7 @@ handleClient global local = do
         threadDelay $ (s_vardiffRetargetTime . g_settings $ global) * 10^(6 :: Integer)
         putMVar vardiffTrigger ()
 
-    -- vardiff/ban thread
+    -- vardiff/kick thread
     (linkChild (c_handler local) =<<) . async . forever $ do
         -- wait till trigger
         _ <- takeMVar vardiffTrigger
@@ -388,14 +375,9 @@ handleClient global local = do
         -- find out when was vardiff last triggered
         currentTime <- getPOSIXTime
 
-        let setDiff diff = do
-                debugM "vardiff" $ "Vardiff client diff adjust: " ++ show (diff * 65536)
-                writeResponse Null $ SetDifficulty $ diff * 65536
-            banClient = do
-                writeChan (g_banChan global) $ c_host local
-                infoM "client" $ "Disconnected  " ++ c_host local ++ " for too many dead shares"
-                throw $ KillClientException "Too many dead shares submitted"
-            doNothing = return ()
+        let setDiff diff = writeResponse Null $ SetDifficulty $ diff * 65536
+            kickClient   = killClient "Too many dead shares submitted"
+            doNothing    = return ()
 
         upstreamDiff   <- readIORef $ g_upstreamDiff global
 
@@ -426,7 +408,7 @@ handleClient global local = do
                         currentHash   = ad2h (fromIntegral target     * (60 / fromIntegral elapsedTime)) currentDiff
 
                     -- ban the client if 90% of submitted shares are dead
-                    if | lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9 -> return banClient
+                    if | lastShares > target && (fromIntegral lastSharesDead / fromIntegral lastShares :: Double) >= 0.9 -> return kickClient
 
                     -- otherwise, check if hashrate is in vardiff allowance
                        | currentHash * (1 - targetAllowance) > estimatedHash || estimatedHash > currentHash * (1 + targetAllowance) -> do
@@ -590,25 +572,11 @@ handleDB global local = do
     infoM "db" "Redis connected"
 
     -- handle share logging
-    (linkChild (d_handler local) =<<) $ async $ forever $ readChan (g_shareChan global) >>= \share -> do
+    forever $ readChan (g_shareChan global) >>= \share -> do
         result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
         case result of
             Right _ -> return ()
             Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
-
-    -- checking IPs
-    (linkChild (d_handler local) =<<) $ async $ forever $ readChan (g_checkChan global) >>= \(host, callback) -> do
-        result <- R.runRedis conn $ R.exists $ "ipban:" <> B8.pack host
-        case result of
-            Right val -> callback val
-            _         -> callback False
-
-    -- banning IPs
-    forever $ readChan (g_banChan global) >>= \host -> do
-        -- There are cases cases when work notification is out of sync
-        -- TODO: reenable this mechanism once it's resolved
-        -- _ <- R.runRedis conn $ R.setex ("ipban:" <> B8.pack host) (60 * (fromIntegral . s_banExpiry . g_settings $ global)) ""
-        return ()
 
 finaliseDB :: DBState -> IO ()
 finaliseDB local = readIORef (h_children . d_handler $ local) >>= mapM_ cancel
