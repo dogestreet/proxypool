@@ -6,6 +6,12 @@ A Stratum to Stratum proxy pool. Released under AGPL-V3.
 `proxypool` is a pool server that splits work from an upstream pool server and redistributes them to its miners, handling both share submission and sharelogging for it's patrons.
 
 Hosted on [Doge Street mining pool](http://doge.st)
+Donations :) DGJucYFxGt84y2YQEyskGVpg5aJ8vKTVtb
+
+## Compatibility ##
+There is a bug in cgminer v3.7.2 that incorrectly assumes the `extraNonce2` field is always 4 bytes long, this results in some parts of the `coinbase2` being overwritten by the nonce rendering all submitted work invalid. This only affects upstream servers that have `coinbase2` as non zero values. P2Pool is not affected.
+
+If you are running a pool server that is using non zero values in `coinbase2` (such as `stratum-mining`), please ask your miners to upgrade to the latest `cgminer` or `sgminer`.
 
 ## Features ##
 

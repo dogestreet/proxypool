@@ -164,7 +164,6 @@ data GlobalState
     = GlobalState { g_clientCounter  :: IORef Integer
                   , g_nonceCounter   :: IORef Integer
                   , g_matchCounter   :: IORef Integer
-                  , g_extraNonce1    :: IORef B.ByteString
                   , g_upstreamDiff   :: IORef Double
                   , g_work           :: IORef (Work, B.Builder, B.Builder)
                   -- | Submit stales since they are still useful for p2pool
@@ -211,8 +210,8 @@ initaliseGlobal :: ServerSettings -> IO GlobalState
 initaliseGlobal settings = GlobalState                          <$>
                            newIORef 0                           <*>
                            newIORef 0                           <*>
+                           -- start at 3 since the server sends the 1st two messages
                            newIORef 3                           <*>
-                           newIORef ""                          <*>
                            newIORef 0                           <*>
                            newIORef (emptyWork, mempty, mempty) <*>
                            newIORef (emptyWork, mempty, mempty) <*>
@@ -335,6 +334,7 @@ handleClient global local = do
                     let newDiff = min diff upstreamDiff
                     writeTVar (c_difficulty local) newDiff
                     return newDiff
+
                 writeResponse Null $ SetDifficulty $ newDiff * 65536
 
         -- immediately send a job to the client if possible
@@ -436,7 +436,6 @@ handleClient global local = do
             prevNonce        <- readIORef $ c_prevNonce local
             (work, _, _)     <- readIORef $ g_work global
             (prevWork, _, _) <- readIORef $ g_prevWork global
-            en1              <- readIORef $ g_extraNonce1 global
             upstreamDiff     <- readIORef $ g_upstreamDiff global
 
             -- make sure the share's valid
@@ -447,13 +446,13 @@ handleClient global local = do
 
             -- check if the share was already submitted
             let rawShare = s_extraNonce2 sub <> s_nTime sub <> s_nonce sub <> T.pack (show nonce)
-            duplicate <- readMVar (g_used global) >>= return . S.member rawShare
+            duplicate <- withMVar (g_used global) $ return . S.member rawShare
 
             (submitDiff, fresh) <-
                 if | s_job sub == w_job work && not duplicate ->
-                       return (targetToDifficulty $ getPOW sub work en1 (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, True)
+                       return (targetToDifficulty $ getPOW sub work (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, True)
                    | s_job sub == w_job prevWork ->
-                       return (targetToDifficulty $ getPOW sub prevWork en1 (prevNonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, False)
+                       return (targetToDifficulty $ getPOW sub prevWork (prevNonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, False)
                    | otherwise -> return (0, False)
 
             -- verify job and share difficulty
@@ -466,7 +465,7 @@ handleClient global local = do
                         if fresh
                             then do
                                 modifyMVar_ (g_used global) $ return . S.insert rawShare
-                                writeResponse rid $ General $ Right $ Bool fresh
+                                writeResponse rid $ General $ Right $ Bool True
                             else writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-4), String "Stale"]
 
                 -- didn't meet the difficulty requirement or job is too far back
@@ -517,11 +516,10 @@ handleServer global local = do
             when (oen2s /= (s_extraNonce2Size . g_settings $ global) + (s_extraNonce3Size . g_settings $ global)) $ liftIO $ throwIO $ KillServerException $ "Invalid nonce sizes specified, must add up to " ++ show oen2s
 
             -- save the original nonce
-            let en1Bytes = T.encodeUtf8 en1
-            liftIO $ writeIORef (g_extraNonce1 global) en1Bytes
-            finish en1Bytes
-
+            finish en1
         _ -> continue
+
+    debugM "server" $ "extraNonce1: " ++ T.unpack extraNonce1
 
     -- authorize
     infoM "server" "Sending authorization"
@@ -530,10 +528,12 @@ handleServer global local = do
     -- thread to listen for server notifications
     (linkChild (s_handler local) =<<) . async $ do
         process handle $ liftIO . \case
-            Just (Response (Number 2) (General (Right _))) -> infoM "server" "Upstream authorized"
+            -- sometimes the server doesn't strictly obey JSON RPC
+            Just (Response (Number 2) (General (Right (Bool False)))) -> throwIO $ KillServerException "Upstream authorisation failed (non standard response)"
+            Just (Response (Number 2) (General (Right (Bool True))))  -> infoM "server" "Upstream authorized"
             Just (Response (Number 2) (General (Left _)))  -> throwIO $ KillServerException "Upstream authorisation failed"
-            Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) ->
-                case fromWorkNotify wn of
+            Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) -> do
+                case fromWorkNotify wn extraNonce1 of
                     Just work -> do
                         -- set the work
                         let fromParts = mconcat . map B.byteString
@@ -541,7 +541,7 @@ handleServer global local = do
                                                   , T.encodeUtf8 job, "\",\""
                                                   , T.encodeUtf8 prev, "\",\""
                                                   , T.encodeUtf8 cb1
-                                                  , extraNonce1
+                                                  , T.encodeUtf8 extraNonce1
                                                   ]
                             !part2a   = fromParts [ "\",\"", T.encodeUtf8 cb2, "\"," ]
                             !part2b   = B.lazyByteString $ encode merkle
@@ -556,7 +556,7 @@ handleServer global local = do
                         -- clear the submitted shares
                         _ <- swapMVar (g_used global) S.empty
 
-                        -- save the work before so we can still validate shares
+                        -- save the previous work item so we can still validate shares
                         writeIORef (g_prevWork global) =<< readIORef (g_work global)
                         writeIORef (g_work global) (work, part1, part2)
 
@@ -564,12 +564,13 @@ handleServer global local = do
                         writeChan (g_notifyChan global) JobNotify
                     Nothing   -> errorM "server" "Invalid upstream work received"
             Just (Response _ (SetDifficulty diff)) -> do
+                debugM "server" $ "Upstream set difficulty to: " ++ show diff
                 -- save the upstream diff
                 let newDiff = diff / 65536
                 writeIORef (g_upstreamDiff global) newDiff
                 writeChan (g_notifyChan global) DiffNotify
             Just (Response (Number _) (General (Right _))) -> debugM "share" $ "Upstream share accepted"
-            Just (Response (Number _) (General (Left  _))) -> debugM "share" $ "Upstream share rejected"
+            Just (Response (Number _) (General (Left  err))) -> debugM "share" $ "Upstream share rejected: " ++ show err
             _ -> return ()
 
     -- thread to listen to client requests (forever)

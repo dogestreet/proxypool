@@ -60,21 +60,21 @@ data Work
            , w_nBit            :: B.ByteString
            } deriving (Show, Eq)
 
-fromWorkNotify :: StratumResponse -> Maybe Work
-fromWorkNotify wn@(WorkNotify{}) = do
+fromWorkNotify :: StratumResponse -> T.Text -> Maybe Work
+fromWorkNotify wn@(WorkNotify{}) en1 = do
     merkle <- case fromJSON $ Array $ wn_merkle wn of
         Success x -> Just x
         Error _   -> Nothing
 
     return $ Work (T.copy $ wn_job wn)
                   (unpackBE $ fromHex $ wn_prevHash wn)
-                  (fromHex $ wn_coinbase1 wn)
+                  ((fromHex $ wn_coinbase1 wn) <> (fromHex en1))
                   (fromHex $ wn_coinbase2 wn)
                   (map fromHex merkle)
                   (fromInteger $ unpackIntBE $ fromHex $ wn_blockVersion wn)
                   (unpackBE $ fromHex $ wn_nBit wn)
 
-fromWorkNotify _ = Nothing
+fromWorkNotify _ _ = Nothing
 
 emptyWork :: Work
 emptyWork = Work ""
@@ -86,14 +86,14 @@ emptyWork = Work ""
                  (B.replicate 4 0)
 
 -- | Get the the share bits from submission
-getPOW :: StratumRequest -> Work -> B.ByteString -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
-getPOW sb@(Submit{}) work en1 en2 en3Size f = f header
+getPOW :: StratumRequest -> Work -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
+getPOW sb@(Submit{}) work en2 en3Size f = f header
     where en3    = unpackIntLE . fromHex $ s_extraNonce2 sb
           ntime  = unpackIntBE . fromHex $ s_nTime sb
           nonce  = unpackIntBE . fromHex $ s_nonce sb
-          header = packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
+          header = packBlockHeader work en2 (en3, en3Size) ntime nonce
 
-getPOW _ _ _ _ _ _ = 0
+getPOW _ _ _ _ _ = 0
 
 -- | Scrypt proof of work algorithm, expect input to be exactly 80 bytes
 scrypt :: B.ByteString -> Integer
@@ -118,11 +118,10 @@ unpackIntBE = unpackIntLE . B.reverse
 unpackBE :: B.ByteString -> B.ByteString
 unpackBE xs = BL.toStrict $ B.toLazyByteString $ mconcat $ take (B.length xs `quot` 4) $ map (B.byteString . B.reverse . B.take 4) $ iterate (B.drop 4) xs
 
--- | Generates an 80 byte block header
-packBlockHeader :: Work -> B.ByteString -> (Integer, Int) -> (Integer, Int) -> Integer -> Integer -> B.ByteString
-packBlockHeader work en1 en2 en3 ntime nonce
+-- | Generates an 80 byte block header, en1 is assumed to be appened to the end of coinbase1 already
+packBlockHeader :: Work -> (Integer, Int) -> (Integer, Int) -> Integer -> Integer -> B.ByteString
+packBlockHeader work en2 en3 ntime nonce
     = let coinbase = BL.toStrict $ B.toLazyByteString $ B.byteString (w_coinbase1 work)         <>
-                                                        (B.byteString . fst . B16.decode $ en1) <>
                                                         uncurry packIntLE en2                   <>
                                                         uncurry packIntLE en3                   <>
                                                         B.byteString (w_coinbase2 work)
