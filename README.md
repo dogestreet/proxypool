@@ -6,6 +6,7 @@ A Stratum to Stratum proxy pool. Released under AGPL-V3.
 `proxypool` is a pool server that splits work from an upstream pool server and redistributes them to its miners, handling both share submission and sharelogging for it's patrons.
 
 Hosted on [Doge Street mining pool](http://doge.st)
+
 Donations :) DGJucYFxGt84y2YQEyskGVpg5aJ8vKTVtb
 
 ## Compatibility ##
