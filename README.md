@@ -34,7 +34,7 @@ Upon client share submission, the server checks that the share matches the requi
 ## Installation ##
 Hackage package coming soon.
 
-`cabal` >= 1.18 is recommended since since it includes package sandbox support.
+`cabal` >= 1.18 is recommended since it includes for sandboxes.
 To build:
 
     $ cabal sandbox init
