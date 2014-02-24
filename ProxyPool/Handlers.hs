@@ -51,6 +51,7 @@ import Data.Monoid ((<>), mconcat, mempty)
 
 import Data.Time.Clock.POSIX
 
+import qualified Data.HashSet as S
 import qualified Data.Vector as V
 
 import qualified Data.Text as T
@@ -168,6 +169,8 @@ data GlobalState
                   , g_work           :: IORef (Work, B.Builder, B.Builder)
                   -- | Submit stales since they are still useful for p2pool
                   , g_prevWork       :: IORef (Work, B.Builder, B.Builder)
+                  -- | Prevent duplicate share submission
+                  , g_used           :: MVar (S.HashSet T.Text)
                   -- | Channel for work notifications
                   , g_notifyChan     :: Chan JobNotify
                   -- | Channel for upstream requests
@@ -208,11 +211,12 @@ initaliseGlobal :: ServerSettings -> IO GlobalState
 initaliseGlobal settings = GlobalState                          <$>
                            newIORef 0                           <*>
                            newIORef 0                           <*>
-                           newIORef 0                           <*>
+                           newIORef 3                           <*>
                            newIORef ""                          <*>
                            newIORef 0                           <*>
                            newIORef (emptyWork, mempty, mempty) <*>
                            newIORef (emptyWork, mempty, mempty) <*>
+                           newMVar S.empty                      <*>
                            newChan                              <*>
                            newChan                              <*>
                            newChan                              <*>
@@ -435,25 +439,38 @@ handleClient global local = do
             en1              <- readIORef $ g_extraNonce1 global
             upstreamDiff     <- readIORef $ g_upstreamDiff global
 
+            -- make sure the share's valid
+            when (T.length (s_extraNonce2 sub) /= (s_extraNonce3Size . g_settings $ global) * 2
+                     || T.length (s_nTime sub) /= 8
+                     || T.length (s_nonce sub) /= 8
+                 ) $ killClient "Malformed share received"
+
+            -- check if the share was already submitted
+            let rawShare = s_extraNonce2 sub <> s_nTime sub <> s_nonce sub <> T.pack (show nonce)
+            duplicate <- readMVar (g_used global) >>= return . S.member rawShare
+
             (submitDiff, fresh) <-
-                if | s_job sub == w_job work ->
+                if | s_job sub == w_job work && not duplicate ->
                        return (targetToDifficulty $ getPOW sub work en1 (nonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, True)
                    | s_job sub == w_job prevWork ->
                        return (targetToDifficulty $ getPOW sub prevWork en1 (prevNonce, en2Size) (s_extraNonce3Size . g_settings $ global) scrypt, False)
                    | otherwise -> return (0, False)
 
             -- verify job and share difficulty
-            if submitDiff >= diff
-                -- submit share to upstream, even if it's stale. Since stales in P2Pool can still find blocks
-                then liftIO $ do
-                    when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (s_username . g_settings $ global), s_extraNonce2 = (T.decodeUtf8 . BL.toStrict . packEn2 $ nonce) <> s_extraNonce2 sub }
+            if | duplicate -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-5), String "Duplicate"]
+               | submitDiff >= diff ->
+                    liftIO $ do
+                        -- submit share to upstream even if it's stale. Since stales in P2Pool can still be blocks
+                        when (submitDiff >= upstreamDiff) $ upstreamRequest $ sub { s_worker = (s_username . g_settings $ global), s_extraNonce2 = (T.decodeUtf8 . BL.toStrict . packEn2 $ nonce) <> s_extraNonce2 sub }
 
-                    if fresh
-                        then writeResponse rid $ General $ Right $ Bool fresh
-                        else writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-4), String "Stale"]
+                        if fresh
+                            then do
+                                modifyMVar_ (g_used global) $ return . S.insert rawShare
+                                writeResponse rid $ General $ Right $ Bool fresh
+                            else writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-4), String "Stale"]
 
                 -- didn't meet the difficulty requirement or job is too far back
-                else liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
+               | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
             writeChan (g_shareChan global) $ Share user diff (s_serverName . g_settings $ global) fresh
@@ -535,6 +552,9 @@ handleServer global local = do
                                                   , if clean then "true" else "false", "]}"
                                                   ]
                             !part2    = part2a <> part2b <> part2c
+
+                        -- clear the submitted shares
+                        _ <- swapMVar (g_used global) S.empty
 
                         -- save the work before so we can still validate shares
                         writeIORef (g_prevWork global) =<< readIORef (g_work global)

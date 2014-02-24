@@ -87,10 +87,11 @@ emptyWork = Work ""
 
 -- | Get the the share bits from submission
 getPOW :: StratumRequest -> Work -> B.ByteString -> (Integer, Int) -> Int -> (B.ByteString -> Integer) -> Integer
-getPOW sb@(Submit{}) work en1 en2 en3Size f = f $ packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
+getPOW sb@(Submit{}) work en1 en2 en3Size f = f header
     where en3    = unpackIntLE . fromHex $ s_extraNonce2 sb
           ntime  = unpackIntBE . fromHex $ s_nTime sb
           nonce  = unpackIntBE . fromHex $ s_nonce sb
+          header = packBlockHeader work en1 en2 (en3, en3Size) ntime nonce
 
 getPOW _ _ _ _ _ _ = 0
 
