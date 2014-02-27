@@ -173,7 +173,7 @@ data GlobalState
                   -- | Channel for upstream requests
                   , g_upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
-                  , g_shareChan      :: Chan Share
+                  , g_shareChan      :: Chan B.ByteString
                   , g_settings       :: ServerSettings
                   }
 
@@ -489,7 +489,7 @@ handleClient global local = do
                | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            writeChan (g_shareChan global) $ Share user diff (s_serverName . g_settings $ global) fresh
+            writeChan (g_shareChan global) $ BL.toStrict $ encode $ Share user diff (s_serverName . g_settings $ global) fresh
 
             -- record shares for vardiff
             atomically $ do
@@ -611,7 +611,7 @@ handleDB global local = do
 
     -- handle share logging
     forever $ readChan (g_shareChan global) >>= \share -> do
-        result <- R.runRedis conn $ R.publish channel $ BL.toStrict $ encode share
+        result <- R.runRedis conn $ R.publish channel share
         case result of
             Right _ -> return ()
             Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
