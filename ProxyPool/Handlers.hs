@@ -35,13 +35,11 @@ import Control.Monad.Trans.Either
 
 import Control.Exception hiding (handle)
 
-import Control.Concurrent.STM
-
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.STM
+import Control.Concurrent.MVar
 import Control.Concurrent.Chan
 import Control.Concurrent.Async
-
-import Control.Concurrent.MVar
 
 import Data.IORef
 import Data.Aeson
@@ -316,6 +314,7 @@ handleClient global local = do
             -- send request to the upstream listener
             writeChan (g_upstreamChan global) $ Request (Number . fromInteger $ rid) request
 
+        -- | Disconnects the client by throwing an exception
         killClient :: String -> IO ()
         killClient = throwIO . KillClientException (c_id local) (c_host local)
 
@@ -352,17 +351,17 @@ handleClient global local = do
                     writeTVar (c_difficulty local) newDiff
                     return newDiff
 
-                writeResponse Null $ SetDifficulty $ newDiff * 65536
-
                 (_, part1, part2) <- readIORef $ g_work global
 
-                -- get generate unique client nonce
+                -- generate unique client nonce
                 nonce <- atomicModifyIORef' (g_nonceCounter global) $ join (&&&) $ \x -> (x + 1) `mod` (2 ^ (8 * en2Size))
 
                 -- save the previous nonce
                 writeIORef (c_prevNonce local) =<< readIORef (c_nonce local)
                 writeIORef (c_nonce local) nonce
 
+                -- send the new job
+                writeResponse Null $ SetDifficulty $ newDiff * 65536
                 writeResponseRaw $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
 
         -- immediately send a job to the client if possible
@@ -398,16 +397,14 @@ handleClient global local = do
         -- wait till trigger
         _ <- takeMVar vardiffTrigger
 
-        -- find out when was vardiff last triggered
-        currentTime <- getPOSIXTime
-
         let setDiff diff = writeResponse Null $ SetDifficulty $ diff * 65536
             kickClient   = killClient "Too many dead shares submitted"
             doNothing    = return ()
 
+        currentTime  <- getPOSIXTime
         upstreamDiff <- readIORef $ g_upstreamDiff global
 
-        -- run computations inside the transaction
+        -- run vardiff inside the transaction
         join $ atomically $ do
             lastTime <- readTVar $ c_lastVardiff local
 
@@ -445,9 +442,7 @@ handleClient global local = do
                               return $ setDiff newDiff
 
                        | otherwise -> return doNothing
-                else do
-                    -- do nothing if no adjustment is required
-                    return doNothing
+                else return doNothing
 
     -- process workers submissions (forever)
     process handle $ \case
@@ -608,7 +603,7 @@ initaliseDB conn = DBState <$> initaliseHandler conn
 handleDB :: GlobalState -> DBState -> IO ()
 handleDB global local = do
     let channel = T.encodeUtf8 $ s_redisChanName . g_settings $ global
-        conn = h_handle . d_handler $ local
+        conn    = h_handle . d_handler $ local
 
     -- test connection first
     _ <- R.runRedis conn R.ping
