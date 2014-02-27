@@ -383,11 +383,11 @@ handleClient global local = do
             kickClient   = killClient "Too many dead shares submitted"
             doNothing    = return ()
 
-        upstreamDiff   <- readIORef $ g_upstreamDiff global
+        upstreamDiff <- readIORef $ g_upstreamDiff global
 
         -- run computations inside the transaction
         join $ atomically $ do
-            lastTime    <- readTVar $ c_lastVardiff local
+            lastTime <- readTVar $ c_lastVardiff local
 
             let elapsedTime      = round $ currentTime - lastTime :: Integer
                 retargetTime     = s_vardiffRetargetTime . g_settings $ global
@@ -528,11 +528,11 @@ handleServer global local = do
     -- thread to listen for server notifications
     (linkChild (s_handler local) =<<) . async $ do
         process handle $ liftIO . \case
-            -- sometimes the server doesn't strictly obey JSON RPC
-            Just (Response (Number 2) (General (Right (Bool False)))) -> throwIO $ KillServerException "Upstream authorisation failed (non standard response)"
+            -- sometimes the upstream server doesn't strictly obey JSON RPC
             Just (Response (Number 2) (General (Right (Bool True))))  -> infoM "server" "Upstream authorized"
-            Just (Response (Number 2) (General (Left _)))  -> throwIO $ KillServerException "Upstream authorisation failed"
-            Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) -> do
+            Just (Response (Number 2) (General (Right (Bool False)))) -> throwIO $ KillServerException "Upstream authorisation failed (non standard response)"
+            Just (Response (Number 2) (General (Left _)))             -> throwIO $ KillServerException "Upstream authorisation failed"
+            Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) ->
                 case fromWorkNotify wn extraNonce1 of
                     Just work -> do
                         -- set the work
@@ -562,15 +562,16 @@ handleServer global local = do
 
                         -- notify listeners
                         writeChan (g_notifyChan global) JobNotify
-                    Nothing   -> errorM "server" "Invalid upstream work received"
+
+                    Nothing -> errorM "server" "Invalid upstream work received"
             Just (Response _ (SetDifficulty diff)) -> do
                 debugM "server" $ "Upstream set difficulty to: " ++ show diff
                 -- save the upstream diff
                 let newDiff = diff / 65536
                 writeIORef (g_upstreamDiff global) newDiff
                 writeChan (g_notifyChan global) DiffNotify
-            Just (Response (Number _) (General (Right _))) -> debugM "share" $ "Upstream share accepted"
-            Just (Response (Number _) (General (Left  err))) -> debugM "share" $ "Upstream share rejected: " ++ show err
+            Just (Response (Number _) (General (Right _)))  -> debugM "share" $ "Upstream share accepted"
+            Just (Response (Number _) (General (Left err))) -> debugM "share" $ "Upstream share rejected: " ++ show err
             _ -> return ()
 
     -- thread to listen to client requests (forever)
