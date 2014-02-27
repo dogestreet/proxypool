@@ -171,15 +171,13 @@ data GlobalState
                   -- | Prevent duplicate share submission
                   , g_used           :: MVar (S.HashSet T.Text)
                   -- | Channel for work notifications
-                  , g_notifyChan     :: Chan JobNotify
+                  , g_notifyChan     :: SkipChan ()
                   -- | Channel for upstream requests
                   , g_upstreamChan   :: Chan Request
                   -- | Channel for share logging broadcasts
                   , g_shareChan      :: Chan Share
                   , g_settings       :: ServerSettings
                   }
-
-data JobNotify = JobNotify | DiffNotify
 
 data Share
     = Share { _sh_submitter  :: {-# UNPACK #-} !T.Text
@@ -202,6 +200,35 @@ data ProxyPoolException = KillClientException { _id :: Integer, _host :: String,
 
 instance Exception ProxyPoolException
 
+-- | Skip chan from http://hackage.haskell.org/package/base-4.5.1.0/docs/Control-Concurrent-MVar.html
+data SkipChan a = SkipChan (MVar (a, [MVar ()])) (MVar ())
+
+newSkipChan :: IO (SkipChan a)
+newSkipChan = do
+    sem <- newEmptyMVar
+    main <- newMVar (undefined, [sem])
+    return $ SkipChan main sem
+
+putSkipChan :: SkipChan a -> a -> IO ()
+putSkipChan (SkipChan main _) v = do
+    (_, sems) <- takeMVar main
+    putMVar main (v, [])
+    mapM_ (\sem -> putMVar sem ()) sems
+
+getSkipChan :: SkipChan a -> IO a
+getSkipChan (SkipChan main sem) = do
+    takeMVar sem
+    (v, sems) <- takeMVar main
+    putMVar main (v, sem:sems)
+    return v
+
+dupSkipChan :: SkipChan a -> IO (SkipChan a)
+dupSkipChan (SkipChan main _) = do
+    sem <- newEmptyMVar
+    (v, sems) <- takeMVar main
+    putMVar main (v, sem:sems)
+    return $ SkipChan main sem
+
 -- | Increments an IORef counter
 incr :: IORef Integer -> IO Integer
 incr counter = atomicModifyIORef' counter $ join (&&&) (1+)
@@ -216,7 +243,7 @@ initaliseGlobal settings = GlobalState                          <$>
                            newIORef (emptyWork, mempty, mempty) <*>
                            newIORef (emptyWork, mempty, mempty) <*>
                            newMVar S.empty                      <*>
-                           newChan                              <*>
+                           newSkipChan                          <*>
                            newChan                              <*>
                            newChan                              <*>
                            return settings
@@ -313,9 +340,20 @@ handleClient global local = do
     -- proxy server notifications
     (linkChild (c_handler local) =<<) . async $ do
         -- duplicate server notification channel
-        localNotifyChan <- dupChan (g_notifyChan global)
+        localNotifyChan <- dupSkipChan $ g_notifyChan global
 
-        let writeJobNotify = do
+        let writeJob = do
+                upstreamDiff <- readIORef $ g_upstreamDiff global
+
+                -- cap local difficulty at upstream diff
+                newDiff <- atomically $ do
+                    diff <- readTVar $ c_difficulty local
+                    let newDiff = min diff upstreamDiff
+                    writeTVar (c_difficulty local) newDiff
+                    return newDiff
+
+                writeResponse Null $ SetDifficulty $ newDiff * 65536
+
                 (_, part1, part2) <- readIORef $ g_work global
 
                 -- get generate unique client nonce
@@ -326,26 +364,12 @@ handleClient global local = do
                 writeIORef (c_nonce local) nonce
 
                 writeResponseRaw $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
-            writeDiffNotify = do
-                upstreamDiff <- readIORef $ g_upstreamDiff global
-                -- cap local difficulty at upstream diff
-                newDiff <- atomically $ do
-                    diff <- readTVar $ c_difficulty local
-                    let newDiff = min diff upstreamDiff
-                    writeTVar (c_difficulty local) newDiff
-                    return newDiff
-
-                writeResponse Null $ SetDifficulty $ newDiff * 65536
 
         -- immediately send a job to the client if possible
         (work, _, _) <- readIORef $ g_work global
-        when (work /= emptyWork) $ do
-            writeDiffNotify
-            writeJobNotify
+        when (work /= emptyWork) writeJob
 
-        forever $ readChan localNotifyChan >>= \case
-            JobNotify  -> writeJobNotify
-            DiffNotify -> writeDiffNotify
+        forever $ getSkipChan localNotifyChan >>= const writeJob
 
     -- wait for mining.authorization call
     user <- process handle $ \case
@@ -561,7 +585,7 @@ handleServer global local = do
                         writeIORef (g_work global) (work, part1, part2)
 
                         -- notify listeners
-                        writeChan (g_notifyChan global) JobNotify
+                        putSkipChan (g_notifyChan global) ()
 
                     Nothing -> errorM "server" "Invalid upstream work received"
             Just (Response _ (SetDifficulty diff)) -> do
@@ -569,7 +593,6 @@ handleServer global local = do
                 -- save the upstream diff
                 let newDiff = diff / 65536
                 writeIORef (g_upstreamDiff global) newDiff
-                writeChan (g_notifyChan global) DiffNotify
             Just (Response (Number _) (General (Right _)))  -> debugM "share" $ "Upstream share accepted"
             Just (Response (Number _) (General (Left err))) -> debugM "share" $ "Upstream share rejected: " ++ show err
             _ -> return ()
