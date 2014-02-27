@@ -33,12 +33,20 @@ This reduces the block search space for clients. However, the impact is negligib
 Upon client share submission, the server checks that the share matches the required upstream difficulty and resubmits it under it's own name.
 
 ## Installation ##
-Hackage package coming soon.
 
-`cabal` >= 1.18 is recommended since it includes support for package sandboxes.
-To build:
+### Getting Haskell platform (Ubuntu 13.10 +) and cabal >= 1.18 ###
+For Ubuntu 13.10 or above:
+    $ sudo apt-get install haskell-platform
+    $ cabal update
+    $ cabal install cabal-install    # installs the latest version of cabal
 
-    $ cabal sandbox init
+Add `PATH="$HOME/.cabal/bin:$PATH"` to your ~/.profile
+
+Check that you now have `cabal` 1.18 or higher
+    $ cabal --version
+
+### Building ###
+    $ cabal sandbox init    # create a package sandbox so you don't mess up your system's packages
     $ cabal configure
     $ cabal build
 
@@ -64,7 +72,7 @@ Variable difficulty allows the server to dynamically adjust share difficulty for
 | `vardiffShares`        | The number of shares submitted in `vardiffRetargetTime` before a difficulty adjustment is forced
 
 ### Invalid share kicks ###
-Since the proxy pool validates shares before submitting to the upstream, profiling results show that checking shares consume around 50% of the server's CPU time. A malicious client sending invalid shares can cause a denial of service for the pool server. The server disconnects a client if they submit over 90% dead shares.
+Since the proxy pool validates shares before submitting to the upstream, profiling results show that checking shares consume around 50% of the server's CPU time. A malicious client sending invalid shares can cause a denial of service for the pool server. The server will disconnect clients that have over 90% invalid shares.
 
 ## References ##
  * [Stratum protocol specifications](https://mining.bitcoin.cz/stratum-mining)

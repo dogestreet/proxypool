@@ -375,9 +375,7 @@ handleClient global local = do
     user <- process handle $ \case
         Just (Request rid (Authorize user _)) -> do
             -- check if the address they are using is a valid address
-            let valid = validateAddress (s_publickeyByte . g_settings $ global) $ T.encodeUtf8 user
-
-            if valid
+            if validateAddress (s_publickeyByte . g_settings $ global) $ T.encodeUtf8 user
                 then do
                     liftIO $ writeResponse rid $ General $ Right $ Bool True
                     finish user
