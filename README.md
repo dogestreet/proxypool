@@ -36,6 +36,7 @@ Upon client share submission, the server checks that the share matches the requi
 
 ### Getting Haskell platform (Ubuntu 13.10 +) and cabal >= 1.18 ###
 For Ubuntu 13.10 or above:
+
     $ sudo apt-get install haskell-platform
     $ cabal update
     $ cabal install cabal-install    # installs the latest version of cabal
@@ -43,6 +44,7 @@ For Ubuntu 13.10 or above:
 Add `PATH="$HOME/.cabal/bin:$PATH"` to your ~/.profile
 
 Check that you now have `cabal` 1.18 or higher
+
     $ cabal --version
 
 ### Building ###
