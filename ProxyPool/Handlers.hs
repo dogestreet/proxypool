@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns, DeriveDataTypeable, MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings, LambdaCase, BangPatterns, DeriveDataTypeable, DeriveFunctor, MultiWayIf #-}
 module ProxyPool.Handlers (
     initaliseGlobal
   , initaliseClient
@@ -29,7 +29,7 @@ import System.Timeout
 import Control.Applicative ((<$>), (<*>))
 import Control.Arrow ((&&&))
 
-import Control.Monad (forever, join, when, unless, mzero)
+import Control.Monad (forever, join, when, unless, mzero, forM_)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Either
 
@@ -172,8 +172,8 @@ data GlobalState
                   , g_notifyChan     :: SkipChan ()
                   -- | Channel for upstream requests
                   , g_upstreamChan   :: Chan Request
-                  -- | Channel for share logging broadcasts
-                  , g_shareChan      :: Chan B.ByteString
+                  -- | List of shares
+                  , g_shareList      :: IORef [B.ByteString]
                   , g_settings       :: ServerSettings
                   }
 
@@ -243,7 +243,7 @@ initaliseGlobal settings = GlobalState                          <$>
                            newMVar S.empty                      <*>
                            newSkipChan                          <*>
                            newChan                              <*>
-                           newChan                              <*>
+                           newIORef []                          <*>
                            return settings
 
 initaliseHandler :: a -> IO (HandlerState a)
@@ -489,7 +489,7 @@ handleClient global local = do
                | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            writeChan (g_shareChan global) $ BL.toStrict $ encode $ Share user diff (s_serverName . g_settings $ global) fresh
+            atomicModifyIORef' (g_shareList global) $ \xs -> ((BL.toStrict $ encode $ Share user diff (s_serverName . g_settings $ global) fresh) : xs, ())
 
             -- record shares for vardiff
             atomically $ do
@@ -610,11 +610,15 @@ handleDB global local = do
     infoM "db" "Redis connected"
 
     -- handle share logging
-    forever $ readChan (g_shareChan global) >>= \share -> do
-        result <- R.runRedis conn $ R.publish channel share
-        case result of
+    forever $ do
+        shares  <- atomicModifyIORef' (g_shareList global) $ (,) []
+        results <- R.runRedis conn $ mapM (R.publish channel) $ reverse shares
+
+        forM_ results $ \case
             Right _ -> return ()
-            Left  _ -> errorM "db" $ "Error while publishing share (" ++ show share ++ ")"
+            Left  _ -> errorM "db" $ "Error while publishing share (" ++ show shares ++ ")"
+
+        threadDelay $ 2 * 10^(6 :: Integer)
 
 finaliseDB :: DBState -> IO ()
 finaliseDB local = readIORef (h_children . d_handler $ local) >>= mapM_ cancel
