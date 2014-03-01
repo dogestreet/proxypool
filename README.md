@@ -20,8 +20,7 @@ If you are running a pool server that is using non zero values in `coinbase2` (s
  * Address validation
  * Redis pubsub for share logging
 
-Currently only Scrypt is supported for upstream servers.
-The source does not yet include the [CPPSRB](http://eligius.st/~gateway/faq/simple-terms-what-summary-cppsrb) payout scripts, it will be released once they are cleaned up and thoroughly tested.
+Currently only Scrypt is supported for upstream servers. This repository does not include the payout system only share logging.
 
 ## How it works (how to proxy Stratrum) ##
 The main problem to solve is how to generate unique work for every proxypool client.
@@ -32,10 +31,10 @@ This reduces the block search space for clients. However, the impact is negligib
 
 Upon client share submission, the server checks that the share matches the required upstream difficulty and resubmits it under it's own name.
 
-## Installation ##
+## Installation guide for (Ubuntu 13.10 +)##
 
-### Getting Haskell platform (Ubuntu 13.10 +) and cabal >= 1.18 ###
-For Ubuntu 13.10 or above:
+### Getting Haskell platform and cabal v1.18+ ###
+Haskell platform provides the compiler and base packages to build the proxypool. Cabal is the Haskell package manager and build tool. We want `cabal` v1.18 or above because it comes with the package sandbox feature - allowing us to install our package dependencies locally instead of system wide.
 
     $ sudo apt-get install haskell-platform
     $ cabal update
@@ -48,12 +47,21 @@ Check that you now have `cabal` 1.18 or higher
     $ cabal --version
 
 ### Building ###
+
     $ cabal sandbox init    # create a package sandbox so you don't mess up your system's packages
     $ cabal configure
     $ cabal build
 
+### Getting Redis ###
+The proxypool [publishes](http://redis.io/topics/pubsub) shares in [Redis](http://redis.io). Ensure it's installed and configured.
+
+    $ sudo apt-get install redis-server
+
 ## Configuration ##
 All configuration is done in `proxypool.json`. Most options should be self explanatory.
+
+### Redis ###
+`redisHost` is the hostname of the Redis server. `redisAuth` is the auth key used to access it, it can be set as `null` if there is no auth key. `redisChanName` is the name of the channel used to publish shares.
 
 ### Address validation ###
 The proxypool implements the proper address validation algorithm for public keys. Since different coins prepend a different byte to the checksum, this option is configurable in `publicKeyByte`. It is expected that miners use their payout address as their username in their mining client. The server does not check passwords.
@@ -62,7 +70,7 @@ The proxypool implements the proper address validation algorithm for public keys
 `extraNonce2Size` and `extraNonce3Size` control the how the upstream's `extraNonce2` is split. Thus `extraNonce2Size` and `extraNonce3Size` should add up the to the upstream's `extraNonce2`'s size.
 
 ### Vardiff control ###
-Variable difficulty allows the server to dynamically adjust share difficulty for clients, improving miner efficency and reducing server load. Difficulty adjustments happen every `vardiffRetargetTime` or if the client has submitted `vardiffShares` in `vardiffRetargetTime`.
+Variable difficulty allows the server to dynamically adjust share difficulty for clients, improving miner efficency and reducing server load. Difficulty adjustments happen every `vardiffRetargetTime` or if the client has submitted `vardiffShares` in `vardiffRetargetTime`. The difficulty values used in the configuration are the raw Bitcoin difficulty values - difficulty 0.0002 is equivalent to difficulty 13.1072 in most mining software (multiply by 65536).
 
 | Vardiff                | Configuration
 | -----------------------|------------------------
