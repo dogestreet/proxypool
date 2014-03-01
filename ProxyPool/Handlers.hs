@@ -393,7 +393,7 @@ handleClient global local = do
 
         _ -> continue
 
-    infoM "client" $ "Client (" ++ show (c_id local) ++ ") authorized - " ++ T.unpack user
+    infoM "client" $ "Client (" ++ show (c_id local) ++ ") authorized - " ++ T.unpack user ++ " from " ++ show (c_host local)
 
     vardiffTrigger <- newEmptyMVar
     getPOSIXTime >>= atomically . writeTVar (c_lastVardiff local)
