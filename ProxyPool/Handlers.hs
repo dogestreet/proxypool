@@ -547,6 +547,7 @@ handleServer global local = do
         process handle $ liftIO . \case
             -- sometimes the upstream server doesn't strictly obey JSON RPC
             Just (Response (Number 2) (General (Right (Bool True))))  -> infoM "server" "Upstream authorized"
+            Just (Response (Number 2) (General (Right Null)))         -> infoM "server" "Upstream authorized (non standard response)"
             Just (Response (Number 2) (General (Right (Bool False)))) -> throwIO $ KillServerException "Upstream authorisation failed (non standard response)"
             Just (Response (Number 2) (General (Left _)))             -> throwIO $ KillServerException "Upstream authorisation failed"
             Just (Response _ wn@(WorkNotify job prev cb1 cb2 merkle bv nbit ntime clean)) ->
