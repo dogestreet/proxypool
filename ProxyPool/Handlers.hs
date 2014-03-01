@@ -75,9 +75,11 @@ data ServerState
 
 data ClientState
     = ClientState { c_handler          :: HandlerState Handle
-                  , c_writerChan       :: Chan B.Builder
+                  , c_writerChan       :: Chan Notice
                   , c_nonce            :: IORef Integer
                   , c_prevNonce        :: IORef Integer
+                  -- | Current job
+                  , c_currentWork      :: IORef (Maybe B.ByteString)
                   -- | Local difficulty managed by vardiff
                   , c_difficulty       :: TVar Double
                   -- | Number of shares submitted by the client since last vardiff retarget
@@ -198,6 +200,8 @@ data ProxyPoolException = KillClientException { _id :: Integer, _host :: String,
 
 instance Exception ProxyPoolException
 
+data Notice = NewWork | NewReply !B.ByteString
+
 -- | Skip chan from http://hackage.haskell.org/package/base-4.5.1.0/docs/Control-Concurrent-MVar.html
 data SkipChan a = SkipChan (MVar (a, [MVar ()])) (MVar ())
 
@@ -262,6 +266,7 @@ initaliseClient handle host global = ClientState                   <$>
                                      newChan                       <*>
                                      newIORef  0                   <*>
                                      newIORef  0                   <*>
+                                     newIORef Nothing              <*>
                                      newTVarIO (s_vardiffInitial . g_settings $ global) <*>
                                      newTVarIO 0                   <*>
                                      newTVarIO 0                   <*>
@@ -292,10 +297,12 @@ handleClient global local = do
     let
         -- | Write server response
         writeResponse :: Value -> StratumResponse -> IO ()
-        writeResponse rid resp = writeResponseRaw $ B.lazyByteString $ encode $ Response rid resp
+        writeResponse rid resp = writeChan (c_writerChan local) $ NewReply $ BL.toStrict $ encode $ Response rid resp
 
-        writeResponseRaw :: B.Builder -> IO ()
-        writeResponseRaw = writeChan (c_writerChan local)
+        writeNewJob :: B.ByteString -> IO ()
+        writeNewJob !bytes = do
+            atomicModifyIORef' (c_currentWork local) $ const (Just bytes, ())
+            writeChan (c_writerChan local) NewWork
 
         en2Size :: Int
         en2Size = s_extraNonce2Size . g_settings $ global
@@ -322,8 +329,12 @@ handleClient global local = do
 
     -- thread to sequence writes
     (linkChild (c_handler local) =<<) . async . forever $ do
-        line <- readChan (c_writerChan local)
-        B.hPutBuilder handle $ line <> B.char8 '\n'
+        notice <- readChan (c_writerChan local)
+        case notice of
+            NewReply line -> B8.hPutStrLn handle line
+            NewWork       -> do
+                bytes <- atomicModifyIORef' (c_currentWork local) $ (,) Nothing
+                maybe (return ()) (B8.hPutStrLn handle) bytes
 
     -- wait for mining.subscription call
     initalised <- timeout (30 * 10^(6 :: Int)) $ process handle $ \case
@@ -341,7 +352,7 @@ handleClient global local = do
         -- duplicate server notification channel
         localNotifyChan <- dupSkipChan $ g_notifyChan global
 
-        let writeJob = do
+        let sendJob = do
                 upstreamDiff <- readIORef $ g_upstreamDiff global
 
                 -- cap local difficulty at upstream diff
@@ -360,15 +371,15 @@ handleClient global local = do
                 writeIORef (c_prevNonce local) =<< readIORef (c_nonce local)
                 writeIORef (c_nonce local) nonce
 
-                -- send the new job
+                -- send the new job with the difficulty adjustment
                 writeResponse Null $ SetDifficulty $ newDiff * 65536
-                writeResponseRaw $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
+                writeNewJob $ BL.toStrict $ B.toLazyByteString $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
 
         -- immediately send a job to the client if possible
         (work, _, _) <- readIORef $ g_work global
-        when (work /= emptyWork) writeJob
+        when (work /= emptyWork) sendJob
 
-        forever $ getSkipChan localNotifyChan >>= const writeJob
+        forever $ getSkipChan localNotifyChan >>= const sendJob
 
     -- wait for mining.authorization call
     user <- process handle $ \case
