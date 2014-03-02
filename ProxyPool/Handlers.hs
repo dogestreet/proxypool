@@ -79,7 +79,7 @@ data ClientState
                   , c_nonce            :: IORef Integer
                   , c_prevNonce        :: IORef Integer
                   -- | Current job
-                  , c_currentWork      :: IORef (Maybe B.ByteString)
+                  , c_currentWork      :: IORef (Maybe B.Builder)
                   -- | Local difficulty managed by vardiff
                   , c_difficulty       :: TVar Double
                   -- | Number of shares submitted by the client since last vardiff retarget
@@ -299,9 +299,9 @@ handleClient global local = do
         writeResponse :: Value -> StratumResponse -> IO ()
         writeResponse rid resp = writeChan (c_writerChan local) $ NewReply $ BL.toStrict $ encode $ Response rid resp
 
-        writeNewJob :: B.ByteString -> IO ()
-        writeNewJob !bytes = do
-            atomicModifyIORef' (c_currentWork local) $ const (Just bytes, ())
+        writeNewJob :: B.Builder -> IO ()
+        writeNewJob !builder = do
+            atomicModifyIORef' (c_currentWork local) $ const (Just builder, ())
             writeChan (c_writerChan local) NewWork
 
         en2Size :: Int
@@ -333,8 +333,8 @@ handleClient global local = do
         case notice of
             NewReply line -> B8.hPutStrLn handle line
             NewWork       -> do
-                bytes <- atomicModifyIORef' (c_currentWork local) $ (,) Nothing
-                maybe (return ()) (B8.hPutStrLn handle) bytes
+                result <- atomicModifyIORef' (c_currentWork local) $ (,) Nothing
+                maybe (return ()) (\bytes -> B.hPutBuilder handle $ bytes <> B.char8 '\n') result
 
     -- wait for mining.subscription call
     initalised <- timeout (30 * 10^(6 :: Int)) $ process handle $ \case
@@ -373,7 +373,7 @@ handleClient global local = do
 
                 -- send the new job with the difficulty adjustment
                 writeResponse Null $ SetDifficulty $ newDiff * 65536
-                writeNewJob $ BL.toStrict $ B.toLazyByteString $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
+                writeNewJob $ part1 <> (B.lazyByteString . packEn2 $ nonce) <> part2
 
         -- immediately send a job to the client if possible
         (work, _, _) <- readIORef $ g_work global
