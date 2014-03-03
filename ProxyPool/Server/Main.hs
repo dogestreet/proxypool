@@ -61,8 +61,8 @@ listenDownstream global port = do
                     (initaliseClient handle (serialiseAddr rawAddr) global)
                     finaliseClient
                     (handleClient global)
-                `catches` [ Handler $ \(e :: IOException) -> infoM "client" $ "IOException in client: " ++ show e
-                          , Handler $ \(e :: ProxyPoolException) -> infoM "client" $ "Killed: " ++ show e
+                `catches` [ Handler $ \(e :: IOException) -> infoM "client" $ "IOException: " ++ show e
+                          , Handler $ \(KillClientException c reason) -> infoM "client" $ c ++ " killed: " ++ reason
                           ]
 
 -- | Manages Redis db connection

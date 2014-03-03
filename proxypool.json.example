@@ -23,5 +23,9 @@
   , "vardiffInitial": 0.0002
   , "vardiffShares": 40
 
+  , "initTimeout": 30
+  , "authTimeout": 30
+  , "clientIdle": 1000
+
   , "logLevel": "INFO"
 }
