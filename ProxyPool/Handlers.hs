@@ -77,7 +77,7 @@ data ServerState
 
 data ClientState
     = ClientState { c_handler          :: HandlerState Handle
-                  , c_writerChan       :: Chan Notice
+                  , c_writerVar        :: MVar Notice
                   , c_nonce            :: IORef Integer
                   , c_prevNonce        :: IORef Integer
                   -- | Current job
@@ -276,7 +276,7 @@ finaliseHandler state = do
 initaliseClient :: Handle -> String -> GlobalState -> IO ClientState
 initaliseClient handle host global = ClientState                   <$>
                                      initaliseHandler handle       <*>
-                                     newChan                       <*>
+                                     newEmptyMVar                  <*>
                                      newIORef  0                   <*>
                                      newIORef  0                   <*>
                                      newIORef Nothing              <*>
@@ -315,12 +315,12 @@ handleClient global local = do
     let
         -- | Write server response
         writeResponse :: Value -> StratumResponse -> IO ()
-        writeResponse rid resp = writeChan (c_writerChan local) $ NewReply $ BL.toStrict $ encode $ Response rid resp
+        writeResponse rid resp = putMVar (c_writerVar local) $ NewReply $ BL.toStrict $ encode $ Response rid resp
 
         writeNewJob :: B.Builder -> IO ()
         writeNewJob !builder = do
             atomicModifyIORef' (c_currentWork local) $ const (Just builder, ())
-            writeChan (c_writerChan local) NewWork
+            putMVar (c_writerVar local) NewWork
 
         en2Size :: Int
         en2Size = s_extraNonce2Size . g_settings $ global
@@ -347,7 +347,7 @@ handleClient global local = do
 
     -- thread to sequence writes
     (linkChild (c_handler local) =<<) . async . forever $ do
-        notice <- readChan (c_writerChan local)
+        notice <- takeMVar (c_writerVar local)
         case notice of
             NewReply line -> B8.hPutStrLn handle line
             NewWork       -> do
