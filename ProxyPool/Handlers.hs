@@ -193,19 +193,21 @@ data GlobalState
                   }
 
 data Share
-    = Share { _sh_submitter  :: {-# UNPACK #-} !T.Text
-            , _sh_difficulty :: {-# UNPACK #-} !Double
-            , _sh_server     :: {-# UNPACK #-} !T.Text
-            , _sh_valid      ::                !Bool
+    = Share { _sh_submitter     :: {-# UNPACK #-} !T.Text
+            , _sh_difficulty    :: {-# UNPACK #-} !Double
+            , _sh_host          :: {-# UNPACK #-} !T.Text
+            , _sh_server        :: {-# UNPACK #-} !T.Text
+            , _sh_valid         ::                !Bool
             }
     deriving (Show, Typeable)
 
 instance ToJSON Share where
-    toJSON (Share sub diff srv valid) = object [ "sub"   .= sub
-                                               , "diff"  .= diff
-                                               , "srv"   .= srv
-                                               , "valid" .= valid
-                                               ]
+    toJSON (Share sub diff host srv valid) = object [ "sub"     .= sub
+                                                    , "diff"    .= diff
+                                                    , "host"    .= host
+                                                    , "srv"     .= srv
+                                                    , "valid"   .= valid
+                                                    ]
 
 data ProxyPoolException = KillClientException { _client :: String, _reason :: String }
                         | KillServerException { _reason :: String }
@@ -531,7 +533,7 @@ handleClient global local = do
                | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            atomicModifyIORef' (g_shareList global) $ \xs -> ((BL.toStrict $ encode $ Share user diff (s_serverName . g_settings $ global) fresh) : xs, ())
+            atomicModifyIORef' (g_shareList global) $ \xs -> ((BL.toStrict $ encode $ Share user diff (T.pack $ c_host local) (s_serverName . g_settings $ global) fresh) : xs, ())
 
             -- record shares for vardiff
             currentTime <- getPOSIXTime
