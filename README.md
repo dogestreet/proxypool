@@ -57,6 +57,18 @@ The proxypool [publishes](http://redis.io/topics/pubsub) shares in [Redis](http:
 
     $ sudo apt-get install redis-server
 
+## Redis data format ##
+Shares are published to Redis in JSON form.
+The format is:
+
+    {
+        "sub": "DPPowFrL1RJ9FKa2NTzcy3kfKwohJYPTNj"  // submitter
+      , "srv": "Test server"                         // name of the proxypool server
+      , "diff": 1.0e-5                               // difficulty in raw form (multiply by 65536 to get cgminer difficulty)
+      , "host":"127.0.0.1"                           // IP of submitter
+      , "valid":true                                 // share validity
+    }
+
 ## Configuration ##
 All configuration is done in `proxypool.json`. Most options should be self explanatory.
 
