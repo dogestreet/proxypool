@@ -65,8 +65,8 @@ The format is:
         "sub": "DPPowFrL1RJ9FKa2NTzcy3kfKwohJYPTNj"  // submitter
       , "srv": "Test server"                         // name of the proxypool server
       , "diff": 1.0e-5                               // difficulty in raw form (multiply by 65536 to get cgminer difficulty)
-      , "host":"127.0.0.1"                           // IP of submitter
-      , "valid":true                                 // share validity
+      , "host": "127.0.0.1"                          // IP of submitter
+      , "valid": true                                // share validity
     }
 
 ## Configuration ##
