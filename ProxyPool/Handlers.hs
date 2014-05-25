@@ -147,29 +147,29 @@ data ServerSettings
                      } deriving (Show)
 
 instance FromJSON ServerSettings where
-    parseJSON (Object v) = ServerSettings             <$>
-                           v .: "serverName"          <*>
-                           v .: "upstreamHost"        <*>
-                           v .: "upstreamPort"        <*>
-                           v .: "localPort"           <*>
-                           v .: "username"            <*>
-                           v .: "password"            <*>
-                           v .: "redisHost"           <*>
-                           v .: "redisAuth"           <*>
-                           v .: "redisChanName"       <*>
-                           v .: "publicKeyByte"       <*>
-                           v .: "extraNonce2Size"     <*>
-                           v .: "extraNonce3Size"     <*>
-                           v .: "vardiffRetargetTime" <*>
-                           v .: "vardiffTarget"       <*>
-                           v .: "vardiffAllowance"    <*>
-                           v .: "vardiffMin"          <*>
-                           v .: "vardiffInitial"      <*>
-                           v .: "vardiffShares"       <*>
-                           v .: "initTimeout"         <*>
-                           v .: "authTimeout"         <*>
-                           v .: "clientIdle"          <*>
-                           v .: "logLevel"
+    parseJSON (Object v) = ServerSettings                              <$>
+                           v .:? "serverName"          .!= "default"   <*>
+                           v .:? "upstreamHost"        .!= "localhost" <*>
+                           v .:? "upstreamPort"        .!= 9555        <*>
+                           v .:? "localPort"           .!= 9666        <*>
+                           v .:? "username"            .!= "username"  <*>
+                           v .:? "password"            .!= "password"  <*>
+                           v .:? "redisHost"           .!= "localhost" <*>
+                           v .:? "redisAuth"           .!= Nothing     <*>
+                           v .:? "redisChanName"       .!= "shares"    <*>
+                           v .:? "publicKeyByte"       .!= 30          <*>
+                           v .:? "extraNonce2Size"     .!= 2           <*>
+                           v .:? "extraNonce3Size"     .!= 2           <*>
+                           v .:? "vardiffRetargetTime" .!= 120         <*>
+                           v .:? "vardiffTarget"       .!= 12          <*>
+                           v .:? "vardiffAllowance"    .!= 0.25        <*>
+                           v .:? "vardiffMin"          .!= 0.0002      <*>
+                           v .:? "vardiffInitial"      .!= 0.000488    <*>
+                           v .:? "vardiffShares"       .!= 20          <*>
+                           v .:? "initTimeout"         .!= 30          <*>
+                           v .:? "authTimeout"         .!= 30          <*>
+                           v .:? "clientIdle"          .!= 1000        <*>
+                           v .:? "logLevel"            .!= "INFO"
 
     parseJSON _          = mzero
 

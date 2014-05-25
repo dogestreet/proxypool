@@ -23,7 +23,7 @@ library
     ghc-prof-options:    -auto-all -caf-all -rtsopts
     exposed-modules:     ProxyPool.Network, ProxyPool.Stratum, ProxyPool.Handlers, ProxyPool.Mining
     -- other-extensions:
-    build-depends:       base >= 4.6 && < 4.7
+    build-depends:       base >= 4.6
                        , containers >= 0.5
                        , mtl >= 2.1.2
                        , transformers >= 0.3.0.0
