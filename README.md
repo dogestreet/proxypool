@@ -31,7 +31,7 @@ This reduces the block search space for clients. However, the impact is negligib
 
 Upon client share submission, the server checks that the share matches the required upstream difficulty and resubmits it under it's own name.
 
-## Installation guide for (Ubuntu 13.10 +)##
+## Installation guide for (Ubuntu 13.10+)##
 
 ### Getting Haskell platform and cabal v1.18+ ###
 Haskell platform provides the compiler and base packages to build the proxypool. Cabal is the Haskell package manager and build tool. We want `cabal` v1.18 or above because it comes with the package sandbox feature - allowing us to install our package dependencies locally instead of system wide.
@@ -51,6 +51,10 @@ Check that you now have `cabal` 1.18 or higher
     $ cabal sandbox init    # create a package sandbox so you don't mess up your system's packages
     $ cabal configure
     $ cabal build
+
+### Running ###
+
+    $ cabal run server
 
 ### Getting Redis ###
 The proxypool [publishes](http://redis.io/topics/pubsub) shares in [Redis](http://redis.io). Ensure it's installed and configured.
@@ -77,6 +81,8 @@ All configuration is done in `proxypool.json`. Most options should be self expla
 
 ### Address validation ###
 The proxypool implements the proper address validation algorithm for public keys. Since different coins prepend a different byte to the checksum, this option is configurable in `publicKeyByte`. It is expected that miners use their payout address as their username in their mining client. The server does not check passwords.
+
+Address validation can be disabled by setting `publicKeyByte` to null in config.
 
 ### Nonce ###
 `extraNonce2Size` and `extraNonce3Size` control the how the upstream's `extraNonce2` is split. Thus `extraNonce2Size` and `extraNonce3Size` should add up the to the upstream's `extraNonce2`'s size.

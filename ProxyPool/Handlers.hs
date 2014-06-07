@@ -46,6 +46,7 @@ import Control.Concurrent.Async
 import Data.IORef
 import Data.Aeson
 import Data.Word
+import Data.Maybe
 import Data.Typeable
 import Data.Monoid ((<>), mconcat, mempty)
 
@@ -120,8 +121,8 @@ data ServerSettings
                      , _redisAuth            :: Maybe T.Text
                      -- | The redis channel to publish to
                      , s_redisChanName       :: T.Text
-                     -- | The byte prepended to the public key, used to verify miner addresses, 0 for Bitcoin, 30 for Dogecoin
-                     , s_publickeyByte       :: Word8
+                     -- | The byte prepended to the public key, used to verify miner addresses, Nothing to disable verification, 0 for Bitcoin, 30 for Dogecoin
+                     , s_publickeyByte       :: Maybe Word8
                      -- | Size of the new en2
                      , s_extraNonce2Size     :: Int
                      -- | Size of the new en3
@@ -157,7 +158,7 @@ instance FromJSON ServerSettings where
                            v .:? "redisHost"           .!= "localhost" <*>
                            v .:? "redisAuth"           .!= Nothing     <*>
                            v .:? "redisChanName"       .!= "shares"    <*>
-                           v .:? "publicKeyByte"       .!= 30          <*>
+                           v .:? "publicKeyByte"       .!= Nothing     <*>
                            v .:? "extraNonce2Size"     .!= 2           <*>
                            v .:? "extraNonce3Size"     .!= 2           <*>
                            v .:? "vardiffRetargetTime" .!= 120         <*>
@@ -407,8 +408,10 @@ handleClient global local = do
     -- wait for mining.authorization call
     maybeUser <- timeout ((s_authTimeout . g_settings $ global) * 10^(6 :: Int)) $ process handle $ \case
         Just (Request rid (Authorize user _)) -> do
-            -- check if the address they are using is a valid address
-            if validateAddress (s_publickeyByte . g_settings $ global) $ T.encodeUtf8 user
+            let keybyte = s_publickeyByte . g_settings $ global
+
+            -- validate address (if required)
+            if isNothing keybyte || validateAddress (fromJust keybyte) (T.encodeUtf8 user)
                 then do
                     liftIO $ writeResponse rid $ General $ Right $ Bool True
                     finish user
