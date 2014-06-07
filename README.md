@@ -22,7 +22,7 @@ If you are running a pool server that is using non zero values in `coinbase2` (s
 
 Currently only Scrypt is supported for upstream servers. This repository does not include the payout system only share logging.
 
-## How it works (how to proxy Stratrum) ##
+## How it works (how to proxy Stratum) ##
 The main problem to solve is how to generate unique work for every proxypool client.
 
 The idea is to reduce the size of `extraNonce2` so that the server controls the first few bytes. This means that server will be able to generate a unique coinbase for each client, mutating the coinbase hash.
