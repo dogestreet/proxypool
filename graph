@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-
-hp2ps -e8in -c server.hp

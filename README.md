@@ -5,10 +5,6 @@ A Stratum to Stratum proxy pool. Released under AGPL-V3.
 
 `proxypool` is a pool server that splits work from an upstream pool server and redistributes them to its miners, handling both share submission and sharelogging for it's patrons.
 
-Hosted on [Doge Street mining pool](http://doge.st)
-
-Donations :) DGJucYFxGt84y2YQEyskGVpg5aJ8vKTVtb
-
 ## Compatibility ##
 There is a bug in cgminer v3.7.2 that incorrectly assumes the `extraNonce2` field is always 4 bytes long, this results in some parts of the `coinbase2` being overwritten by the nonce rendering all submitted work invalid. This only affects upstream servers that have `coinbase2` as non zero values. P2Pool is not affected.
 
@@ -31,7 +27,7 @@ This reduces the block search space for clients. However, the impact is negligib
 
 Upon client share submission, the server checks that the share matches the required upstream difficulty and resubmits it under it's own name.
 
-## Installation guide for (Ubuntu 13.10+)##
+## Installation guide for (Ubuntu 13.10+) ##
 
 ### Getting Haskell platform and cabal v1.18+ ###
 Haskell platform provides the compiler and base packages to build the proxypool. Cabal is the Haskell package manager and build tool. We want `cabal` v1.18 or above because it comes with the package sandbox feature - allowing us to install our package dependencies locally instead of system wide.
