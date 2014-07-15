@@ -9,7 +9,7 @@
 -- | Network module for proxy pool, fixes everything that's wrong with Haskell's network package
 module ProxyPool.Network (configureKeepAlive, connectTimeout, serialiseAddr) where
 
-import Foreign
+import Foreign hiding (unsafePerformIO)
 import Foreign.C
 
 import System.IO.Unsafe (unsafePerformIO)
