@@ -7,6 +7,7 @@
 4. Verify that all the scripts work (payout, sharelog, stats)
 5. To ensure the scripts stay running. I used an upstart script:
 
+
     $ cat /etc/init/payout.conf
 
     start on runlevel [2345]
@@ -19,6 +20,7 @@
 
     env PYTHON_HOME=/home/doge/sharelogger/env
     exec $PYTHON_HOME/bin/python3 /home/doge/sharelogger/payout.py
+
 
 ## Running operations ##
 
