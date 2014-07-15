@@ -20,7 +20,7 @@ If you are running a pool server that is using non zero values in `coinbase2` (s
  * Address validation
  * Redis pubsub for share logging
 
-Currently only Scrypt is supported for upstream servers. This repository does not include the payout system only share logging.
+Currently only Scrypt is supported for upstream servers.
 
 ## How it works (how to proxy Stratum) ##
 The main problem to solve is how to generate unique work for every proxypool client.

@@ -1,0 +1,4 @@
+CherryPy==3.2.4
+bitcoin-python==0.3
+psycopg2==2.5.2
+redis==2.9.1
