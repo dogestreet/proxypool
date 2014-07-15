@@ -51,7 +51,7 @@ BEGIN
     -- Debt (balances) table must be hard locked off, we'll use it as a mutex
     LOCK TABLE balances IN ACCESS EXCLUSIVE MODE;
 
-    SELECT INTO payable_debt COALESCE(SUM(floor(balance)), 0) FROM balances WHERE floor(balance) > minpay;
+    SELECT INTO payable_debt COALESCE(SUM(floor(balance)), 0) FROM balances WHERE floor(balance) >= minpay;
     IF payable_debt > wallet OR payable_debt = 0 THEN
         RETURN null;
     END IF;
@@ -63,14 +63,14 @@ BEGIN
     FOR account IN SELECT address as who,
                           floor(balance) as pay
                    FROM balances
-                   WHERE floor(balance) > minpay
+                   WHERE floor(balance) >= minpay
                    LOOP
 
         INSERT INTO paylog(tid, address, amount) VALUES (next_tid, account.who, account.pay);
     END LOOP;
 
     -- Clean out the ones we just paid
-    DELETE FROM balances WHERE floor(balance) > minpay;
+    DELETE FROM balances WHERE floor(balance) >= minpay;
 
     RETURN next_tid;
 END;
