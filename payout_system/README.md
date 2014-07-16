@@ -1,6 +1,6 @@
 ## Getting it running ##
 
-0. Edit config.py to suit your setup
+0. Rename config.py.example to config.py and configure to suit your setup
 1. Insert proxypool.sql into your DB (postgresql)
 2. Configure pyvenv, install requirements (`pip -r requirements.txt`), I tend to name the environment folder `env`
 3. Apply the patch `bitcoinrpc-util.py.patch`, this fixes bitcoin-rpc for Python 3
