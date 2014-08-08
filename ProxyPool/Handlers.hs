@@ -536,7 +536,7 @@ handleClient global local = do
                | otherwise -> liftIO $ writeResponse rid $ General $ Left $ Array $ V.fromList [Number (-3), String "Invalid share"]
 
             -- log the share
-            atomicModifyIORef' (g_shareList global) $ \xs -> ((BL.toStrict $ encode $ Share user diff (T.pack $ c_host local) (s_serverName . g_settings $ global) fresh) : xs, ())
+            atomicModifyIORef' (g_shareList global) $ \xs -> ((BL.toStrict $ encode $ Share user diff (T.pack $ c_host local) (s_serverName . g_settings $ global) (submitDiff >= diff && fresh)) : xs, ())
 
             -- record shares for vardiff
             currentTime <- getPOSIXTime
